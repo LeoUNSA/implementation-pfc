@@ -1,0 +1,4 @@
+{"snippet_id": "s_vuln_1", "tool": "demo-sast", "verdict": 1}
+{"snippet_id": "s_vuln_2", "tool": "demo-sast", "verdict": 1}
+{"snippet_id": "s_safe_1", "tool": "demo-sast", "verdict": 1}
+{"snippet_id": "s_safe_2", "tool": "demo-sast", "verdict": 0}

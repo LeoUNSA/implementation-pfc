@@ -1,0 +1,4 @@
+{"snippet_id": "s_vuln_1", "cwe": "89", "label": 1, "code": "...", "file": "a.java", "line": 1}
+{"snippet_id": "s_vuln_2", "cwe": "89", "label": 1, "code": "...", "file": "b.java", "line": 1}
+{"snippet_id": "s_safe_1", "cwe": "22", "label": 0, "code": "...", "file": "c.java", "line": 1}
+{"snippet_id": "s_safe_2", "cwe": "22", "label": 0, "code": "...", "file": "d.java", "line": 1}

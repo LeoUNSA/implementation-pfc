@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Raw dataset downloads (large, reproducible via `vulnpipe corpus build`)
+data/
+
+# Per-phase intermediate outputs (regenerable)
+findings/
+metrics/
+figures/
+
+# Corpus outputs ARE committed (ground truth) — keep corpus/*.jsonl tracked.
+!corpus/
