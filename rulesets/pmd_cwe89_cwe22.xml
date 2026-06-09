@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<ruleset name="CWE-89 / CWE-22 syntactic sinks"
+    xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+
+  <description>
+    Hand-authored PMD XPath rules targeting SQL Injection (CWE-89) and
+    Path Traversal (CWE-22). PMD has no taint/dataflow engine, so these are
+    PURELY SYNTACTIC: they flag a known sink whose argument is not a string
+    literal. This deliberately over-approximates (flags sanitized calls too),
+    illustrating the high-false-positive failure mode of rule-based SAST that
+    the hybrid LLM-confirmer stage is designed to mitigate. NOT stock PMD.
+  </description>
+
+  <!-- CWE-89: a JDBC execute* call whose argument is not a string literal. -->
+  <rule name="SqlInjectionConcatExec"
+        language="java"
+        message="Possible SQL Injection (CWE-89): non-literal argument to a JDBC execute method."
+        class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+    <description>Flags execute/executeQuery/executeUpdate/prepareStatement
+      called with anything other than a direct string literal.</description>
+    <priority>3</priority>
+    <properties>
+      <property name="xpath">
+        <value><![CDATA[
+//MethodCall[
+  @MethodName = ('executeQuery','executeUpdate','execute','addBatch','prepareStatement','prepareCall')
+  and ArgumentList[@Size > 0]
+  and not(ArgumentList/StringLiteral)
+]
+        ]]></value>
+      </property>
+    </properties>
+  </rule>
+
+  <!-- CWE-22: a file-system sink constructed from a non-literal path. -->
+  <rule name="PathTraversalFileSink"
+        language="java"
+        message="Possible Path Traversal (CWE-22): non-literal path passed to a file-system sink."
+        class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+    <description>Flags File / FileInputStream / FileReader / RandomAccessFile
+      (and write variants) constructed with anything other than a string literal.</description>
+    <priority>3</priority>
+    <properties>
+      <property name="xpath">
+        <value><![CDATA[
+//ConstructorCall[
+  ClassType[@SimpleName = ('File','FileInputStream','FileOutputStream','FileReader','FileWriter','RandomAccessFile')]
+  and ArgumentList[@Size > 0]
+  and not(ArgumentList/StringLiteral)
+]
+        ]]></value>
+      </property>
+    </properties>
+  </rule>
+
+</ruleset>

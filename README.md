@@ -31,8 +31,13 @@ pip install -e ".[dev]"
 # Build the Juliet corpus (downloads the NIST archive on first run).
 vulnpipe corpus build --only juliet
 
-# Compute metrics for a findings file against the corpus ground truth.
-vulnpipe metrics --findings findings/sast_perSnippet.jsonl
+# Run PMD (vanilla built-in rules + custom CWE-89/22 ruleset) over the corpus.
+# Needs Docker; pulls the pinned pmdcode/pmd image on first run.
+vulnpipe sast run --tool pmd --variant both
+
+# Compute metrics for one or more findings files against the ground truth.
+vulnpipe metrics --findings findings/pmd-vanilla_perSnippet.jsonl \
+                            findings/pmd-custom_perSnippet.jsonl
 ```
 
 ## Phase status
@@ -43,7 +48,8 @@ vulnpipe metrics --findings findings/sast_perSnippet.jsonl
 | Corpus — Juliet | ✅ implemented |
 | Corpus — Defects4J | 🚧 stub (needs Defects4J framework + JDK 11) |
 | Metrics & stats (P/R/F1/FPR, HIS, McNemar, bootstrap) | ✅ implemented |
-| SAST runners (SonarQube, CodeQL, SpotBugs, PMD) | 🚧 interface only |
+| SAST — PMD (vanilla + custom ruleset, containerized) | ✅ implemented |
+| SAST runners (SonarQube, CodeQL, SpotBugs) | 🚧 share PMD's container plumbing |
 | LLM runners (Ollama: DeepSeekCoder, CodeLlama) | 🚧 interface + mock |
 | CodeBERT fine-tune | ⬜ not started |
 | Hybrid pipeline | ⬜ not started |
@@ -57,8 +63,20 @@ src/vulnpipe/
   config.py    config.yaml loader
   io.py        JSONL read/write
   corpus/      juliet.py, defects4j.py (stub), build.py
-  sast/        base.py (runner protocol + aggregation rule)
+  sast/        base.py, container.py, materialize.py, pmd.py
   llm/         base.py, mock.py, prompts.py
   metrics/     join.py, compute.py
   cli.py       `vulnpipe ...` entry point
+rulesets/      pmd_cwe89_cwe22.xml  (custom PMD XPath rules)
 ```
+
+## PMD baseline result (500-snippet Juliet corpus)
+
+| tool | P | R | FPR | F1 | note |
+|---|---|---|---|---|---|
+| pmd-vanilla | 0.00 | 0.00 | 0.00 | 0.00 | built-in `security.xml` has no CWE-89/22 rules — coverage gap |
+| pmd-custom | 0.56 | 0.64 | 0.50 | 0.59 | syntactic sinks, no taint → high false-positive rate (FPR 0.50) |
+
+`pmd-custom`'s 50 % false-positive rate is the rule-based SAST failure
+mode the hybrid LLM-confirmer stage is designed to reduce (the HIS metric
+will quantify the improvement).

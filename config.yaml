@@ -34,6 +34,12 @@ corpus:
     # Validation set — ingestion deferred (see plan). Config reserved.
     n_bugs: 50
 
+sast:
+  pmd:
+    image: "pmdcode/pmd:7.25.0"   # pinned for reproducibility
+    # Variants (vanilla = built-in security.xml; custom = rulesets/pmd_cwe89_cwe22.xml)
+    # and their rule->CWE maps are defined in vulnpipe.sast.pmd.
+
 llm:
   # Stubbed this increment. Real local backends (Ollama) wired later.
   temperature: 0.0

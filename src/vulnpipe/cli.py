@@ -23,6 +23,30 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sast(args: argparse.Namespace) -> int:
+    from vulnpipe.io import load_records
+    from vulnpipe.schemas import Snippet
+
+    cfg = config_mod.load(args.config)
+    corpus_path = (
+        Path(args.corpus) if args.corpus else cfg.path("corpus") / "juliet.jsonl"
+    )
+    if not corpus_path.exists():
+        print(f"error: corpus not found: {corpus_path}", file=sys.stderr)
+        print("run `vulnpipe corpus build --only juliet` first.", file=sys.stderr)
+        return 1
+    corpus = load_records(corpus_path, Snippet.from_dict)
+
+    if args.tool == "pmd":
+        from vulnpipe.sast import pmd
+
+        pmd.run(cfg, corpus, variant=args.variant)
+    else:
+        print(f"error: SAST tool {args.tool!r} not implemented yet", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_metrics(args: argparse.Namespace) -> int:
     from vulnpipe.io import load_records
     from vulnpipe.metrics import (
@@ -43,7 +67,9 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
         return 1
 
     corpus = load_records(corpus_path, Snippet.from_dict)
-    findings = load_records(args.findings, Finding.from_dict)
+    findings = []
+    for fpath in args.findings:
+        findings.extend(load_records(fpath, Finding.from_dict))
     confusions = confusion_by_tool(findings, corpus)
 
     rows = [metrics_from_confusion(tool, c) for tool, c in sorted(confusions.items())]
@@ -87,8 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cbuild.set_defaults(func=_cmd_corpus)
 
+    sast = sub.add_parser("sast", help="run a SAST tool over the corpus")
+    sast_sub = sast.add_subparsers(dest="sast_command", required=True)
+    srun = sast_sub.add_parser("run", help="run a SAST tool")
+    srun.add_argument("--tool", choices=["pmd"], default="pmd")
+    srun.add_argument(
+        "--variant", choices=["vanilla", "custom", "both"], default="both",
+        help="PMD variant(s) to run",
+    )
+    srun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    srun.set_defaults(func=_cmd_sast)
+
     metrics = sub.add_parser("metrics", help="score findings vs ground truth")
-    metrics.add_argument("--findings", required=True, help="*_perSnippet.jsonl path")
+    metrics.add_argument(
+        "--findings", required=True, nargs="+",
+        help="one or more *_perSnippet.jsonl paths (tools merged by 'tool' field)",
+    )
     metrics.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
     metrics.set_defaults(func=_cmd_metrics)
 

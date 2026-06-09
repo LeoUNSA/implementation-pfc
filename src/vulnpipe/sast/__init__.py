@@ -1,5 +1,7 @@
-"""Static analysis layer. Interface + aggregation rule this increment;
-concrete SonarQube/CodeQL/SpotBugs/PMD runners deferred (see plan)."""
+"""Static analysis layer. Container-based runners normalize to ``Finding``.
+
+PMD (vanilla + custom) is implemented; SonarQube/CodeQL/SpotBugs share the
+same ``container`` + ``aggregate_to_finding`` plumbing and follow later."""
 
 from vulnpipe.sast.base import SASTRunner, aggregate_to_finding
 
