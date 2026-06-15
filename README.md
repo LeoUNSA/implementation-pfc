@@ -4,12 +4,6 @@ Reproducibility package for the PFC thesis *"Static Analysis vs. LLMs for
 Automated Detection of SQL Injection (CWE-89) and Path Traversal (CWE-22)
 Vulnerabilities in Java: A Hybrid Pipeline."*
 
-Implements the empirical pipeline described in `../propuesta.md` §6 and
-`../pipeline_outputs.md`: corpus construction → SAST → LLM → CodeBERT →
-hybrid SAST→LLM filter → metrics.
-
-the contract, corpus/dataset handling, containerised SAST, and metrics work.
-
 ## The unifying contract
 
 Every detector — rule-based SAST, fine-tuned classifier, generative LLM —
