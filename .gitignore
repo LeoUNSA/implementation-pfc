@@ -21,9 +21,11 @@ findings/scan/
 # Figures are regenerated from the tracked findings.
 figures/
 
+# Docs stay local.
+docs/
+
 # TRACKED on purpose (expensive to regenerate — minutes of SAST/LLM runtime):
 #   corpus/*.jsonl                  ground truth
 #   findings/*_perSnippet.jsonl     per-detector verdicts (incl. LLM)
 #   findings/llm_runs/*.jsonl       raw per-run LLM outputs
 #   metrics/*.csv                   scored comparison tables
-#   docs/*.md                       implementation + status docs
