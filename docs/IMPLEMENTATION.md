@@ -231,24 +231,95 @@ finding for the timing metric.
 
 The `SASTRunner` protocol in `base.py` defines the interface the remaining
 tools (SonarQube/CodeQL/SpotBugs) will implement; they reuse `container.py`
-and `aggregate_to_finding` unchanged.
+and `aggregate_to_finding` unchanged. The Semgrep runner below already does.
+
+### 5.5 Semgrep runner (`semgrep.py`) — taint mode
+
+Semgrep is the **deliberate opposite of PMD-custom**: the same sink set, but a
+real **taint engine** (sources → propagation → sinks, with sanitizers). It
+reuses every piece of the PMD plumbing — `materialize`, `container.run_container`,
+`container.parse_sarif`, and `pmd.aggregate_findings` are imported directly —
+so the *only* variable between the two tools is taint reachability. That makes
+the precision/FPR delta a clean measurement of what dataflow buys.
+
+`rulesets/semgrep_cwe89_cwe22.yml` has two `mode: taint` rules:
+
+| | **SQL Injection** | **Path Traversal** |
+|---|---|---|
+| id | `sqli-taint-jdbc` | `path-traversal-taint-file` |
+| sinks | `executeQuery/executeUpdate/execute/addBatch/prepareStatement/prepareCall` | `new File/FileInputStream/.../RandomAccessFile`, `Paths.get` |
+| sources | `System.getenv`, `getParameter`, `readLine`, `nextLine`, `getString`, `args[i]`, … | same untrusted-input set |
+| sanitizers | `Integer.parseInt`, allow-list `replaceAll` | `getCanonicalPath`, `normalize`, `..`-stripping |
+
+The same sinks PMD flags structurally only fire here if a tainted source
+*reaches* them unsanitized, so sanitized/constant calls — PMD-custom's false
+positives — are suppressed.
+
+Two integration details worth noting (both cost a debugging round, now
+encoded in tests):
+
+1. **The image has no `semgrep` entrypoint** (unlike `pmdcode/pmd`), so the
+   command is `["semgrep", "scan", ...]`, not just `["scan", ...]`.
+2. **SARIF rule ids are namespaced.** A single-file ruleset's ids appear in
+   SARIF as `rules.<id>` (e.g. `rules.sqli-taint-jdbc`), not the bare `id:`.
+   `RULE_CWE` maps the namespaced form; `test_sast.py` pins this so a future
+   Semgrep version that changes the convention fails loudly.
+
+Exit codes: `0` = ran (findings or not, since `--error` is unused), `1` =
+blocking findings, `>=2` = error (hard fail). Run flags include `--metrics off`
+(no telemetry) and `--disable-version-check` for offline reproducibility.
+
+**Caveat (documented, not hidden):** Semgrep's taint here is intra-procedural
+and we materialise one method per snippet, so Juliet flows that cross helper
+methods are invisible → recall is traded for precision. That is the expected
+SAST trade-off the thesis measures (see §9), not a defect.
 
 ---
 
-## 6. LLM layer (`src/vulnpipe/llm/`) — interfaces + mock
+## 6. LLM layer (`src/vulnpipe/llm/`)
 
-Real models run later (locally via Ollama). For now the contract is fixed:
+Local generative models, run through the same binary-`Finding` contract as
+every other detector.
 
 - `LLMBackend` protocol: `complete(prompt) -> str`.
 - `parse_verdict()`: lenient parser — extracts the first balanced `{...}`
   JSON block (models wrap JSON in prose/fences), falls back to keyword
-  scanning, defaults to *safe* when nothing parses.
+  scanning, defaults to *safe* when nothing parses (a non-committal model is
+  not a detection).
 - `prompts.py`: the four strategies from the proposal — zero-shot, CoT,
   few-shot, and **static-augmented** (the hybrid core: the SAST alert is
   injected so the LLM acts as a confirmer rather than a cold detector).
 - `MockBackend`: deterministic keyword heuristic, so the LLM phase and its
-  tests run offline with no model installed. Real `OllamaBackend` /
-  `OpenAIBackend` slot in behind the same protocol.
+  tests run offline with no model installed.
+- `OllamaBackend` (`ollama.py`): the real backend. POSTs to a running
+  `ollama serve` at `/api/generate` (`stream:false`). Returns a `GenResult`
+  carrying the text **plus** `prompt_eval_count` / `eval_count` (token
+  economics) and `total_duration` (ns → ms wall-clock). `force_json` sets
+  Ollama's `format:"json"` constraint so output is guaranteed parseable —
+  disabled only for CoT, which must emit reasoning prose before its JSON.
+  `is_available()` / `installed_models()` let the CLI fail fast with a clear
+  message when the server is down or the model was not pulled.
+
+### 6.1 Detection runner (`run.py`)
+
+Drives one `(model, strategy)` pair over the corpus:
+
+1. Build the prompt for each snippet (`zero-shot` / `cot` / `few-shot`;
+   `static-augmented` is the hybrid phase, refused here).
+2. Query the model `runs` times and parse each reply to a `Verdict`.
+3. **Majority-vote** the runs into one per-snippet `Finding` (the metrics
+   input). Self-consistency only differs when `temperature > 0`, so at
+   `temp = 0` the runner collapses to a single deterministic run regardless of
+   `runs_per_snippet`.
+
+Two outputs per run: `findings/<tool>_perSnippet.jsonl` (voted, one row per
+snippet — what `metrics` consumes) and `findings/llm_runs/<tool>_runs.jsonl`
+(every individual run with `run_idx`, for self-consistency analysis). The
+`tool` field is `<model>__<strategy>` (model tag sanitized: `:`/`/` → `_`), so
+each pair is scored as its own detector. `few-shot` draws one vulnerable + one
+safe in-context example deterministically from the corpus and holds them out of
+the eval set. Cost is always None (local models are free); tokens and
+wall-clock come straight from the Ollama response.
 
 ---
 
@@ -280,6 +351,8 @@ Stdlib `argparse`, exposed as the `vulnpipe` console script.
 ```bash
 vulnpipe corpus build --only juliet                  # build the labelled corpus
 vulnpipe sast run --tool pmd --variant both           # run PMD vanilla + custom
+vulnpipe sast run --tool semgrep                      # run Semgrep (taint mode)
+vulnpipe llm run --model deepseek-coder:6.7b-instruct --strategy zero-shot
 vulnpipe metrics --findings A.jsonl B.jsonl [...]     # score (tools merged by 'tool')
 ```
 
@@ -287,14 +360,21 @@ vulnpipe metrics --findings A.jsonl B.jsonl [...]     # score (tools merged by '
 
 ## 9. Current empirical result (500-snippet Juliet corpus)
 
-| tool | P | R | FPR | F1 |
-|---|---|---|---|---|
-| pmd-vanilla | 0.00 | 0.00 | 0.00 | 0.00 |
-| pmd-custom | 0.56 | 0.64 | 0.50 | 0.59 |
+| tool | P | R | FPR | F1 | TP | FP | TN | FN |
+|---|---|---|---|---|---|---|---|---|
+| pmd-vanilla | 0.00 | 0.00 | 0.00 | 0.00 | 0 | 0 | 250 | 250 |
+| pmd-custom | 0.56 | 0.64 | 0.50 | 0.59 | 159 | 126 | 124 | 91 |
+| semgrep | 0.92 | 0.39 | 0.04 | 0.54 | 97 | 9 | 241 | 153 |
 
-`pmd-vanilla` confirms the coverage gap; `pmd-custom`'s 50 % false-positive
-rate is exactly the rule-based-SAST failure mode the hybrid LLM-confirmer is
-designed to reduce. The HIS metric will later quantify that reduction.
+`pmd-vanilla` confirms the coverage gap. `pmd-custom` and `semgrep` run the
+**same sink set**, isolating the effect of taint analysis: PMD-custom maximizes
+recall (0.64) at a punishing FPR (0.50, 126 false positives); Semgrep's taint
+engine cuts false positives to 9 (FPR 0.04, precision 0.92) but loses recall
+(0.39) because intra-procedural taint over one-method snippets misses
+cross-method flows. This is the classic SAST precision/recall dichotomy — no
+tool wins on F1, and the gap is exactly what the hybrid SAST→LLM stage targets
+(filter PMD-custom's high-recall alerts with an LLM confirmer; the HIS metric
+will quantify the gain).
 
 ---
 
@@ -305,6 +385,12 @@ designed to reduce. The HIS metric will later quantify that reduction.
 - Deterministic seeds for corpus sampling and bootstrap.
 - Known environment gaps for later phases: `mvn` and `ollama` not installed;
   JDK 26 on host vs JDK 11 expected by SpotBugs + Defects4J.
+- **Compilation fork.** PMD and Semgrep analyse *source* AST, so they accept
+  the non-compiling `final class S { <method> }` wrapper directly. Bytecode/
+  build-graph tools (SpotBugs+FindSecBugs need `.class` files; CodeQL needs a
+  build database) cannot — they will require a separate *compilable* corpus
+  variant or a full Juliet build. This is why Semgrep was the natural next
+  runner and SpotBugs/CodeQL are deferred behind that extra step.
 
 ---
 
@@ -325,14 +411,18 @@ src/vulnpipe/
     container.py    docker run + SARIF parsing
     materialize.py  snippets → parseable .java files
     pmd.py          PMD vanilla + custom variants
+    semgrep.py      Semgrep taint-mode runner (reuses pmd aggregation)
   llm/
     base.py         LLMBackend protocol + verdict parser
-    mock.py         deterministic offline backend
     prompts.py      4 prompting strategies
+    mock.py         deterministic offline backend
+    ollama.py       real local backend (/api/generate) + GenResult
+    run.py          detection runner (prompt → vote → per-snippet Finding)
   metrics/
     join.py         findings → confusion counts
     compute.py      P/R/F1/FPR, HIS, McNemar, bootstrap CI
   cli.py            `vulnpipe` entry point
 rulesets/
-  pmd_cwe89_cwe22.xml   custom PMD XPath rules
+  pmd_cwe89_cwe22.xml      custom PMD XPath rules (syntactic)
+  semgrep_cwe89_cwe22.yml  Semgrep taint rules (same sinks)
 ```

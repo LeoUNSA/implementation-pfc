@@ -12,10 +12,18 @@ venv/
 # Raw dataset downloads (large, reproducible via `vulnpipe corpus build`)
 data/
 
-# Per-phase intermediate outputs (regenerable)
-findings/
-metrics/
+# Regenerable scan inputs and raw tool reports (large / throwaway):
+#   findings/scan/  = one materialized .java per snippet
+#   *.sarif         = raw SAST reports (parsed into the tracked jsonl below)
+findings/scan/
+*.sarif
+
+# Figures are regenerated from the tracked findings.
 figures/
 
-# Corpus outputs ARE committed (ground truth) — keep corpus/*.jsonl tracked.
-!corpus/
+# TRACKED on purpose (expensive to regenerate — minutes of SAST/LLM runtime):
+#   corpus/*.jsonl                  ground truth
+#   findings/*_perSnippet.jsonl     per-detector verdicts (incl. LLM)
+#   findings/llm_runs/*.jsonl       raw per-run LLM outputs
+#   metrics/*.csv                   scored comparison tables
+#   docs/*.md                       implementation + status docs

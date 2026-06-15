@@ -1,0 +1,95 @@
+# Semgrep taint rules for SQL Injection (CWE-89) and Path Traversal (CWE-22).
+#
+# Counterpart to rulesets/pmd_cwe89_cwe22.xml, but the OPPOSITE engine model:
+# PMD's custom rules are purely SYNTACTIC (flag a sink whose argument is not a
+# string literal) because PMD has no dataflow analysis. Semgrep runs in TAINT
+# MODE, so a sink is reported ONLY when an untrusted SOURCE actually reaches it
+# and no SANITIZER intervenes. Same sink set as the PMD ruleset on purpose:
+# the only variable between the two tools is taint reachability, so the
+# precision / false-positive-rate delta isolates the value of dataflow.
+#
+# Limitation (documented honestly): Semgrep taint here is intra-procedural and
+# we materialize one method per snippet, so Juliet flows that cross helper
+# methods are not tracked -> recall is traded for precision. That is the
+# expected SAST trade-off the thesis measures, not a bug.
+
+rules:
+  # ---- CWE-89: SQL Injection -------------------------------------------
+  - id: sqli-taint-jdbc
+    languages: [java]
+    severity: ERROR
+    message: >-
+      SQL Injection (CWE-89): untrusted input reaches a JDBC execute method
+      without sanitization.
+    metadata:
+      cwe: "CWE-89"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: System.getenv(...)
+      - pattern: System.getProperty(...)
+      - pattern: $X.getParameter(...)
+      - pattern: $X.getHeader(...)
+      - pattern: $X.readLine()
+      - pattern: $X.nextLine()
+      - pattern: $X.next()
+      - pattern: $RS.getString(...)
+      - pattern: $A[$I]
+    pattern-sanitizers:
+      # Numeric coercion and allow-list cleaning neutralize SQLi.
+      - pattern: Integer.parseInt(...)
+      - pattern: Integer.valueOf(...)
+      - pattern: Long.parseLong(...)
+      - pattern: $X.replaceAll("[^a-zA-Z0-9]", ...)
+      - pattern: $X.replaceAll("[^0-9]", ...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $STMT.$M(...)
+          - metavariable-pattern:
+              metavariable: $M
+              patterns:
+                - pattern-either:
+                    - pattern: executeQuery
+                    - pattern: executeUpdate
+                    - pattern: execute
+                    - pattern: addBatch
+                    - pattern: prepareStatement
+                    - pattern: prepareCall
+
+  # ---- CWE-22: Path Traversal ------------------------------------------
+  - id: path-traversal-taint-file
+    languages: [java]
+    severity: ERROR
+    message: >-
+      Path Traversal (CWE-22): untrusted input reaches a file-system sink
+      without canonicalization or sanitization.
+    metadata:
+      cwe: "CWE-22"
+      category: security
+      confidence: HIGH
+    mode: taint
+    pattern-sources:
+      - pattern: System.getenv(...)
+      - pattern: System.getProperty(...)
+      - pattern: $X.getParameter(...)
+      - pattern: $X.getHeader(...)
+      - pattern: $X.readLine()
+      - pattern: $X.nextLine()
+      - pattern: $X.next()
+      - pattern: $A[$I]
+    pattern-sanitizers:
+      # Canonicalization / normalization / dot-dot stripping defuse traversal.
+      - pattern: $F.getCanonicalPath()
+      - pattern: $P.normalize()
+      - pattern: $X.replace("..", ...)
+      - pattern: $X.replaceAll("\\.\\.", ...)
+    pattern-sinks:
+      - pattern: new File(...)
+      - pattern: new FileInputStream(...)
+      - pattern: new FileOutputStream(...)
+      - pattern: new FileReader(...)
+      - pattern: new FileWriter(...)
+      - pattern: new RandomAccessFile(...)
+      - pattern: java.nio.file.Paths.get(...)
+      - pattern: Paths.get(...)

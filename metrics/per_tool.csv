@@ -1,0 +1,4 @@
+tool,precision,recall,fpr,f1,tp,fp,tn,fn
+deepseek-coder_6.7b-instruct__zero-shot,0.8467,0.8840,0.1600,0.8650,221,40,210,29
+pmd-custom,0.5579,0.6360,0.5040,0.5944,159,126,124,91
+semgrep,0.9151,0.3880,0.0360,0.5449,97,9,241,153

@@ -41,9 +41,46 @@ def _cmd_sast(args: argparse.Namespace) -> int:
         from vulnpipe.sast import pmd
 
         pmd.run(cfg, corpus, variant=args.variant)
+    elif args.tool == "semgrep":
+        from vulnpipe.sast import semgrep
+
+        semgrep.run(cfg, corpus)
     else:
         print(f"error: SAST tool {args.tool!r} not implemented yet", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_llm(args: argparse.Namespace) -> int:
+    from vulnpipe.io import load_records
+    from vulnpipe.llm import run as llm_run
+    from vulnpipe.llm.ollama import installed_models, is_available
+    from vulnpipe.schemas import Snippet
+
+    cfg = config_mod.load(args.config)
+    if not is_available(args.host):
+        print(f"error: no Ollama server at {args.host}", file=sys.stderr)
+        print("start it with `ollama serve`.", file=sys.stderr)
+        return 1
+    have = installed_models(args.host)
+    if args.model not in have:
+        print(f"error: model {args.model!r} not pulled. Have: {have}", file=sys.stderr)
+        print(f"pull it with `ollama pull {args.model}`.", file=sys.stderr)
+        return 1
+
+    corpus_path = (
+        Path(args.corpus) if args.corpus else cfg.path("corpus") / "juliet.jsonl"
+    )
+    if not corpus_path.exists():
+        print(f"error: corpus not found: {corpus_path}", file=sys.stderr)
+        return 1
+    corpus = load_records(corpus_path, Snippet.from_dict)
+
+    llm_run.run(
+        cfg, corpus, model=args.model, strategy=args.strategy,
+        runs=args.runs, temperature=args.temperature, limit=args.limit,
+        host=args.host,
+    )
     return 0
 
 
@@ -116,13 +153,28 @@ def build_parser() -> argparse.ArgumentParser:
     sast = sub.add_parser("sast", help="run a SAST tool over the corpus")
     sast_sub = sast.add_subparsers(dest="sast_command", required=True)
     srun = sast_sub.add_parser("run", help="run a SAST tool")
-    srun.add_argument("--tool", choices=["pmd"], default="pmd")
+    srun.add_argument("--tool", choices=["pmd", "semgrep"], default="pmd")
     srun.add_argument(
         "--variant", choices=["vanilla", "custom", "both"], default="both",
-        help="PMD variant(s) to run",
+        help="PMD variant(s) to run (ignored for semgrep)",
     )
     srun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
     srun.set_defaults(func=_cmd_sast)
+
+    llm = sub.add_parser("llm", help="run a local LLM over the corpus")
+    llm_sub = llm.add_subparsers(dest="llm_command", required=True)
+    lrun = llm_sub.add_parser("run", help="run one (model, strategy) detector")
+    lrun.add_argument("--model", required=True, help="Ollama model tag, e.g. deepseek-coder:6.7b-instruct")
+    lrun.add_argument(
+        "--strategy", choices=["zero-shot", "cot", "few-shot"], default="zero-shot",
+        help="prompting strategy (static-augmented is the hybrid phase)",
+    )
+    lrun.add_argument("--runs", type=int, default=None, help="queries per snippet (majority vote; needs temp>0)")
+    lrun.add_argument("--temperature", type=float, default=None, help="sampling temperature (default: config)")
+    lrun.add_argument("--limit", type=int, default=None, help="only the first N snippets (smoke test)")
+    lrun.add_argument("--host", default="http://localhost:11434", help="Ollama server URL")
+    lrun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    lrun.set_defaults(func=_cmd_llm)
 
     metrics = sub.add_parser("metrics", help="score findings vs ground truth")
     metrics.add_argument(

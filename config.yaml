@@ -39,6 +39,10 @@ sast:
     image: "pmdcode/pmd:7.25.0"   # pinned for reproducibility
     # Variants (vanilla = built-in security.xml; custom = rulesets/pmd_cwe89_cwe22.xml)
     # and their rule->CWE maps are defined in vulnpipe.sast.pmd.
+  semgrep:
+    image: "semgrep/semgrep:1.103.0"   # pinned; "latest" drifts past it
+    # Taint-mode ruleset rulesets/semgrep_cwe89_cwe22.yml (sources/sinks/
+    # sanitizers). rule->CWE map lives in vulnpipe.sast.semgrep.
 
 llm:
   # Stubbed this increment. Real local backends (Ollama) wired later.

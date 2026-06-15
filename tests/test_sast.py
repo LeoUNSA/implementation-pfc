@@ -75,3 +75,47 @@ def test_aggregate_findings_covers_full_corpus():
 def test_vanilla_variant_has_empty_cwe_map():
     # vanilla cannot map any rule to a target CWE -> recall 0 by construction.
     assert VARIANTS["vanilla"].rule_cwe == {}
+
+
+def test_semgrep_sarif_uses_namespaced_rule_ids(tmp_path):
+    # Semgrep namespaces a single-file ruleset's ids under "rules.", so the
+    # SARIF ruleId is "rules.<id>" — the map must match that, not the bare id.
+    from vulnpipe.sast.semgrep import RULE_CWE
+
+    assert RULE_CWE == {
+        "rules.sqli-taint-jdbc": "89",
+        "rules.path-traversal-taint-file": "22",
+    }
+    sarif = {
+        "runs": [
+            {
+                "results": [
+                    {
+                        "ruleId": "rules.sqli-taint-jdbc",
+                        "message": {"text": "sqli"},
+                        "locations": [
+                            {"physicalLocation": {
+                                "artifactLocation": {"uri": "juliet_CWE89__a__bad.java"},
+                                "region": {"startLine": 100},
+                            }}
+                        ],
+                    },
+                    {   # bare (un-namespaced) id must NOT map -> dropped
+                        "ruleId": "sqli-taint-jdbc",
+                        "message": {"text": "sqli"},
+                        "locations": [
+                            {"physicalLocation": {
+                                "artifactLocation": {"uri": "juliet_CWE89__b__bad.java"},
+                                "region": {"startLine": 1},
+                            }}
+                        ],
+                    },
+                ]
+            }
+        ]
+    }
+    p = tmp_path / "semgrep.sarif"
+    p.write_text(json.dumps(sarif), encoding="utf-8")
+    issues = parse_sarif(p, "semgrep", RULE_CWE, only_mapped=True)
+    assert len(issues) == 1
+    assert issues[0].cwe == "89" and issues[0].snippet_id == "juliet_CWE89__a__bad"
