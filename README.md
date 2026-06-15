@@ -8,7 +8,6 @@ Implements the empirical pipeline described in `../propuesta.md` §6 and
 `../pipeline_outputs.md`: corpus construction → SAST → LLM → CodeBERT →
 hybrid SAST→LLM filter → metrics.
 
-**Deep dive:** see [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) for how
 the contract, corpus/dataset handling, containerised SAST, and metrics work.
 
 ## The unifying contract
