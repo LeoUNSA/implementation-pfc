@@ -45,6 +45,29 @@ def join_to_truth(
     return dict(by_tool)
 
 
+def aligned_predictions(
+    findings: Iterable[Finding], corpus: Iterable[Snippet]
+) -> tuple[list[str], list[int], dict[str, list[int]]]:
+    """Align every tool's verdicts to a shared snippet order.
+
+    Returns ``(snippet_ids, y_true, {tool: y_pred})`` where all lists index
+    the same snippets in corpus order. Missing (snippet, tool) verdicts
+    default to negative (0), matching ``confusion_by_tool``. This paired
+    layout is what the bootstrap CI and McNemar test consume.
+    """
+    corpus = list(corpus)
+    truth = _truth_map(corpus)
+    verdicts_by_tool = join_to_truth(findings, corpus)
+
+    ids = [s.snippet_id for s in corpus]
+    y_true = [truth[sid] for sid in ids]
+    y_pred = {
+        tool: [verdicts.get(sid, 0) for sid in ids]
+        for tool, verdicts in verdicts_by_tool.items()
+    }
+    return ids, y_true, y_pred
+
+
 def confusion_by_tool(
     findings: Iterable[Finding], corpus: Iterable[Snippet]
 ) -> dict[str, Confusion]:

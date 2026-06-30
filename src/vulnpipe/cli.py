@@ -84,10 +84,55 @@ def _cmd_llm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hybrid(args: argparse.Namespace) -> int:
+    from vulnpipe.hybrid import run as hybrid_run
+    from vulnpipe.io import load_records
+    from vulnpipe.llm.ollama import installed_models, is_available
+    from vulnpipe.schemas import Finding, Snippet
+
+    cfg = config_mod.load(args.config)
+    if not is_available(args.host):
+        print(f"error: no Ollama server at {args.host}", file=sys.stderr)
+        print("start it with `ollama serve`.", file=sys.stderr)
+        return 1
+    have = installed_models(args.host)
+    if args.model not in have:
+        print(f"error: model {args.model!r} not pulled. Have: {have}", file=sys.stderr)
+        print(f"pull it with `ollama pull {args.model}`.", file=sys.stderr)
+        return 1
+
+    corpus_path = (
+        Path(args.corpus) if args.corpus else cfg.path("corpus") / "juliet.jsonl"
+    )
+    if not corpus_path.exists():
+        print(f"error: corpus not found: {corpus_path}", file=sys.stderr)
+        return 1
+    corpus = load_records(corpus_path, Snippet.from_dict)
+
+    sast_findings: list[Finding] = []
+    for fpath in args.sast:
+        if not Path(fpath).exists():
+            print(f"error: SAST findings not found: {fpath}", file=sys.stderr)
+            print("run `vulnpipe sast run ...` first.", file=sys.stderr)
+            return 1
+        sast_findings.extend(load_records(fpath, Finding.from_dict))
+
+    hybrid_run.run(
+        cfg, corpus, sast_findings, model=args.model, scope=args.scope,
+        runs=args.runs, temperature=args.temperature, limit=args.limit,
+        host=args.host,
+    )
+    return 0
+
+
 def _cmd_metrics(args: argparse.Namespace) -> int:
     from vulnpipe.io import load_records
     from vulnpipe.metrics import (
+        aligned_predictions,
+        bootstrap_f1_ci,
         confusion_by_tool,
+        his,
+        mcnemar,
         metrics_from_confusion,
     )
     from vulnpipe.schemas import Finding, Snippet
@@ -111,11 +156,26 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
 
     rows = [metrics_from_confusion(tool, c) for tool, c in sorted(confusions.items())]
 
+    # Bootstrap 95% F1 CI per tool over the paired (truth, prediction) arrays.
+    mcfg = cfg.raw.get("metrics", {})
+    n_resamples = int(mcfg.get("bootstrap_resamples", 1000))
+    alpha = float(mcfg.get("alpha", 0.05))
+    _, y_true, y_pred = aligned_predictions(findings, corpus)
+    for m in rows:
+        if m.tool in y_pred:
+            lo, hi = bootstrap_f1_ci(
+                y_true, y_pred[m.tool], n_resamples=n_resamples, alpha=alpha
+            )
+            m.f1_ci_low, m.f1_ci_high = lo, hi
+
     out_dir = cfg.ensure_path("metrics")
     out_path = out_dir / "per_tool.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["tool", "precision", "recall", "fpr", "f1", "tp", "fp", "tn", "fn"])
+        w.writerow(
+            ["tool", "precision", "recall", "fpr", "f1",
+             "f1_ci_low", "f1_ci_high", "tp", "fp", "tn", "fn"]
+        )
         for m in rows:
             w.writerow(
                 [
@@ -124,6 +184,8 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
                     f"{m.recall:.4f}",
                     f"{m.fpr:.4f}",
                     f"{m.f1:.4f}",
+                    f"{m.f1_ci_low:.4f}" if m.f1_ci_low is not None else "",
+                    f"{m.f1_ci_high:.4f}" if m.f1_ci_high is not None else "",
                     m.tp,
                     m.fp,
                     m.tn,
@@ -132,7 +194,34 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
             )
     print(f"wrote {out_path}")
     for m in rows:
-        print(f"  {m.tool:24s} P={m.precision:.3f} R={m.recall:.3f} F1={m.f1:.3f}")
+        ci = (
+            f" CI[{m.f1_ci_low:.3f},{m.f1_ci_high:.3f}]"
+            if m.f1_ci_low is not None
+            else ""
+        )
+        print(f"  {m.tool:48s} P={m.precision:.3f} R={m.recall:.3f} F1={m.f1:.3f}{ci}")
+
+    # Optional hybrid comparison: HIS triad + pairwise McNemar significance.
+    if args.compare:
+        f1 = {m.tool: m.f1 for m in rows}
+        sast, llm, hyb = args.compare
+        missing = [t for t in args.compare if t not in f1]
+        if missing:
+            print(f"error: --compare tool(s) not in findings: {missing}", file=sys.stderr)
+            return 1
+        score = his(f1[hyb], f1[sast], f1[llm])
+        best = max(f1[sast], f1[llm])
+        print("\nHybrid Improvement Score (HIS)")
+        print(f"  SAST={sast} F1={f1[sast]:.3f} | LLM={llm} F1={f1[llm]:.3f} | "
+              f"HYBRID={hyb} F1={f1[hyb]:.3f}")
+        print(f"  best component F1={best:.3f}  ->  HIS={score:+.4f}  "
+              f"({'hybrid wins' if score > 0 else 'no improvement'})")
+        print("\nMcNemar (paired, vs ground truth)")
+        for a, b in ((hyb, sast), (hyb, llm)):
+            r = mcnemar(y_true, y_pred[a], y_pred[b])
+            sig = "significant" if r.p_value < alpha else "n.s."
+            print(f"  {a} vs {b}: b={r.b} c={r.c} stat={r.statistic:.3f} "
+                  f"p={r.p_value:.4g} ({sig} @ a={alpha})")
     return 0
 
 
@@ -176,12 +265,35 @@ def build_parser() -> argparse.ArgumentParser:
     lrun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
     lrun.set_defaults(func=_cmd_llm)
 
+    hybrid = sub.add_parser("hybrid", help="run the hybrid SAST->LLM pipeline")
+    hybrid_sub = hybrid.add_subparsers(dest="hybrid_command", required=True)
+    hrun = hybrid_sub.add_parser("run", help="confirm/reject SAST alerts with an LLM")
+    hrun.add_argument(
+        "--sast", required=True, nargs="+",
+        help="one or more SAST *_perSnippet.jsonl files (unioned as candidates)",
+    )
+    hrun.add_argument("--model", required=True, help="Ollama model tag (the confirmer)")
+    hrun.add_argument(
+        "--scope", choices=["reject", "augment"], default="reject",
+        help="reject = confirmer only; augment = also cold-detect SAST-negatives",
+    )
+    hrun.add_argument("--runs", type=int, default=None, help="queries per snippet (majority vote; needs temp>0)")
+    hrun.add_argument("--temperature", type=float, default=None, help="sampling temperature (default: config)")
+    hrun.add_argument("--limit", type=int, default=None, help="only the first N snippets (smoke test)")
+    hrun.add_argument("--host", default="http://localhost:11434", help="Ollama server URL")
+    hrun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    hrun.set_defaults(func=_cmd_hybrid)
+
     metrics = sub.add_parser("metrics", help="score findings vs ground truth")
     metrics.add_argument(
         "--findings", required=True, nargs="+",
         help="one or more *_perSnippet.jsonl paths (tools merged by 'tool' field)",
     )
     metrics.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    metrics.add_argument(
+        "--compare", nargs=3, metavar=("SAST", "LLM", "HYBRID"),
+        help="three tool names: print HIS + pairwise McNemar significance",
+    )
     metrics.set_defaults(func=_cmd_metrics)
 
     return p

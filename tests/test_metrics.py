@@ -85,3 +85,18 @@ def test_aggregate_to_finding_rule():
     # No issues -> safe.
     f3 = aggregate_to_finding("s1", "pmd", [], target_cwes=["89", "22"])
     assert f3.verdict == 0
+
+
+def test_aligned_predictions_orders_and_defaults():
+    from vulnpipe.metrics import aligned_predictions
+
+    corpus = _corpus()
+    findings = [
+        Finding("s_vuln_1", "t", 1),
+        Finding("s_safe_1", "t", 1),
+        # s_vuln_2, s_safe_2 absent for tool "t" -> default 0
+    ]
+    ids, y_true, y_pred = aligned_predictions(findings, corpus)
+    assert ids == ["s_vuln_1", "s_vuln_2", "s_safe_1", "s_safe_2"]
+    assert y_true == [1, 1, 0, 0]
+    assert y_pred["t"] == [1, 0, 1, 0]  # missing rows default negative, corpus order

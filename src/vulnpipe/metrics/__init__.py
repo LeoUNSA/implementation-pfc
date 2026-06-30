@@ -10,15 +10,22 @@ from vulnpipe.metrics.compute import (
     mcnemar,
     metrics_from_confusion,
 )
-from vulnpipe.metrics.join import confusion_by_tool, join_to_truth
+from vulnpipe.metrics.compute import McNemarResult
+from vulnpipe.metrics.join import (
+    aligned_predictions,
+    confusion_by_tool,
+    join_to_truth,
+)
 
 __all__ = [
     "Confusion",
     "ToolMetrics",
+    "McNemarResult",
     "bootstrap_f1_ci",
     "his",
     "mcnemar",
     "metrics_from_confusion",
+    "aligned_predictions",
     "confusion_by_tool",
     "join_to_truth",
 ]
