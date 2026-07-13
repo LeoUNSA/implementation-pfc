@@ -225,6 +225,40 @@ def _cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_figures(args: argparse.Namespace) -> int:
+    from vulnpipe.figures import make_all
+    from vulnpipe.io import load_records
+    from vulnpipe.schemas import Finding, Snippet
+
+    cfg = config_mod.load(args.config)
+    corpus_path = (
+        Path(args.corpus) if args.corpus else cfg.path("corpus") / "juliet.jsonl"
+    )
+    if not corpus_path.exists():
+        print(f"error: corpus not found: {corpus_path}", file=sys.stderr)
+        return 1
+    corpus = load_records(corpus_path, Snippet.from_dict)
+
+    findings: list = []
+    for fpath in args.findings:
+        if not Path(fpath).exists():
+            print(f"error: findings not found: {fpath}", file=sys.stderr)
+            return 1
+        findings.extend(load_records(fpath, Finding.from_dict))
+
+    out_dir = Path(args.out) if args.out else cfg.ensure_path("figures")
+    venn = tuple(args.venn) if args.venn else None
+    try:
+        written = make_all(findings, corpus, out_dir, venn=venn, fmt=args.format)
+    except ImportError as e:
+        print(f"error: figure extras missing ({e}). "
+              f"install with `pip install -e '.[figures]'`.", file=sys.stderr)
+        return 1
+    for path in written:
+        print(f"wrote {path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vulnpipe", description=__doc__)
     p.add_argument("--config", default=None, help="path to config.yaml")
@@ -295,6 +329,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="three tool names: print HIS + pairwise McNemar significance",
     )
     metrics.set_defaults(func=_cmd_metrics)
+
+    figures = sub.add_parser("figures", help="render PR / cost-vs-F1 / Venn figures")
+    figures.add_argument(
+        "--findings", required=True, nargs="+",
+        help="one or more *_perSnippet.jsonl paths",
+    )
+    figures.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    figures.add_argument("--out", default=None, help="output dir (default: figures/)")
+    figures.add_argument(
+        "--venn", nargs=3, metavar=("SAST", "LLM", "HYBRID"), default=None,
+        help="three tool names for the true-positive Venn diagram",
+    )
+    figures.add_argument("--format", default="pdf", choices=["pdf", "png"], help="figure file format")
+    figures.set_defaults(func=_cmd_figures)
 
     return p
 

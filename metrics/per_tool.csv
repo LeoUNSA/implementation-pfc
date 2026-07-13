@@ -1,6 +1,12 @@
 tool,precision,recall,fpr,f1,f1_ci_low,f1_ci_high,tp,fp,tn,fn
+codellama_13b-instruct__zero-shot,0.5143,0.6480,0.6120,0.5735,0.5277,0.6209,162,153,97,88
+deepseek-coder_6.7b-instruct__cot,0.7204,0.8040,0.3120,0.7599,0.7205,0.7986,201,78,172,49
+deepseek-coder_6.7b-instruct__few-shot,0.4990,0.9920,0.9960,0.6640,0.6226,0.7030,248,249,1,2
 deepseek-coder_6.7b-instruct__zero-shot,0.8467,0.8840,0.1600,0.8650,0.8320,0.8957,221,40,210,29
+hybrid__pmd-custom+semgrep__codellama_13b-instruct__augment,0.5602,0.3720,0.2920,0.4471,0.3869,0.5057,93,73,177,157
+hybrid__pmd-custom+semgrep__codellama_13b-instruct__reject,0.9038,0.1880,0.0200,0.3113,0.2455,0.3790,47,5,245,203
 hybrid__pmd-custom+semgrep__deepseek-coder_6.7b-instruct__augment,0.8406,0.6960,0.1320,0.7615,0.7181,0.8042,174,33,217,76
 hybrid__pmd-custom+semgrep__deepseek-coder_6.7b-instruct__reject,0.9817,0.4280,0.0080,0.5961,0.5344,0.6558,107,2,248,143
 pmd-custom,0.5579,0.6360,0.5040,0.5944,0.5480,0.6427,159,126,124,91
+pmd-vanilla,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0,0,250,250
 semgrep,0.9151,0.3880,0.0360,0.5449,0.4813,0.6011,97,9,241,153
