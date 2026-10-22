@@ -30,3 +30,6 @@ docs/
 #   findings/*_perSnippet.jsonl     per-detector verdicts (incl. LLM)
 #   findings/llm_runs/*.jsonl       raw per-run LLM outputs
 #   metrics/*.csv                   scored comparison tables
+
+# Run logs
+*.log
