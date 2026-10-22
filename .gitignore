@@ -16,6 +16,7 @@ data/
 #   findings/scan/  = one materialized .java per snippet
 #   *.sarif         = raw SAST reports (parsed into the tracked jsonl below)
 findings/scan/
+findings/*/scan/
 *.sarif
 
 # Figures are regenerated from the tracked findings.

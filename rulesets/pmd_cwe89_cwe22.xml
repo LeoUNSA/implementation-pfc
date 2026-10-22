@@ -25,7 +25,7 @@
       <property name="xpath">
         <value><![CDATA[
 //MethodCall[
-  @MethodName = ('executeQuery','executeUpdate','execute','addBatch','prepareStatement','prepareCall')
+  @MethodName = ('executeQuery','executeUpdate','execute','executeLargeUpdate','addBatch','prepareStatement','prepareCall','query','queryForObject','queryForList','queryForMap','queryForRowSet','queryForLong','queryForInt','update','batchUpdate')
   and ArgumentList[@Size > 0]
   and not(ArgumentList/StringLiteral)
 ]
@@ -47,6 +47,13 @@
         <value><![CDATA[
 //ConstructorCall[
   ClassType[@SimpleName = ('File','FileInputStream','FileOutputStream','FileReader','FileWriter','RandomAccessFile')]
+  and ArgumentList[@Size > 0]
+  and not(ArgumentList/StringLiteral)
+]
+|
+//MethodCall[
+  @MethodName = 'get'
+  and TypeExpression/ClassType[@SimpleName = 'Paths']
   and ArgumentList[@Size > 0]
   and not(ArgumentList/StringLiteral)
 ]

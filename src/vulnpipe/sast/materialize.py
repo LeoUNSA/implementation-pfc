@@ -19,6 +19,7 @@ slice itself (less reliable, but keeps materialization working corpus-only).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -70,12 +71,21 @@ def _brace_complete_method(source: str, name_hint: str | None) -> str | None:
     return "\n".join(lines[start : end + 1])
 
 
+_COMPILATION_UNIT = re.compile(r"^(package|import)\s", re.M)
+
+
 def wrap_snippet(snippet: Snippet, full_source: str | None = None) -> str:
     """Return parseable Java for one snippet: its method wrapped in a class.
 
-    Prefers ``full_source`` (the original file) for reliable extraction;
-    falls back to the snippet's own slice, then to the raw slice verbatim.
+    A snippet that is already a whole file (OWASP Benchmark) is written
+    as-is. Otherwise prefers ``full_source`` (the original file) for reliable
+    extraction; falls back to the snippet's own slice, then to the raw slice.
     """
+    code = snippet.code
+    if (full_source is None and _COMPILATION_UNIT.search(code)
+            and code.count("{") == code.count("}")):
+        return code + "\n"
+
     name_hint = _method_name_of(snippet.snippet_id)
 
     body = None

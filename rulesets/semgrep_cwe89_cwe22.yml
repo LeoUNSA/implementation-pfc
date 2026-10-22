@@ -28,9 +28,19 @@ rules:
     mode: taint
     pattern-sources:
       - pattern: System.getenv(...)
-      - pattern: System.getProperty(...)
+      - pattern: $P.getProperty(...)
       - pattern: $X.getParameter(...)
+      - pattern: $X.getParameterValues(...)
+      - pattern: $X.getParameterMap()
+      - pattern: $X.getParameterNames()
       - pattern: $X.getHeader(...)
+      - pattern: $X.getHeaders(...)
+      - pattern: $X.getHeaderNames()
+      - pattern: $X.getQueryString()
+      - pattern: $X.getCookies()
+      - pattern: $X.getTheParameter(...)
+      - pattern: $X.getTheCookie(...)
+      - pattern: $X.getInputStream()
       - pattern: $X.readLine()
       - pattern: $X.nextLine()
       - pattern: $X.next()
@@ -43,6 +53,7 @@ rules:
       - pattern: Long.parseLong(...)
       - pattern: $X.replaceAll("[^a-zA-Z0-9]", ...)
       - pattern: $X.replaceAll("[^0-9]", ...)
+      - pattern: $E.encodeForSQL(...)
     pattern-sinks:
       - patterns:
           - pattern: $STMT.$M(...)
@@ -56,6 +67,16 @@ rules:
                     - pattern: addBatch
                     - pattern: prepareStatement
                     - pattern: prepareCall
+                    - pattern: executeLargeUpdate
+                    - pattern: query
+                    - pattern: queryForObject
+                    - pattern: queryForList
+                    - pattern: queryForMap
+                    - pattern: queryForRowSet
+                    - pattern: queryForLong
+                    - pattern: queryForInt
+                    - pattern: update
+                    - pattern: batchUpdate
 
   # ---- CWE-22: Path Traversal ------------------------------------------
   - id: path-traversal-taint-file
@@ -71,9 +92,19 @@ rules:
     mode: taint
     pattern-sources:
       - pattern: System.getenv(...)
-      - pattern: System.getProperty(...)
+      - pattern: $P.getProperty(...)
       - pattern: $X.getParameter(...)
+      - pattern: $X.getParameterValues(...)
+      - pattern: $X.getParameterMap()
+      - pattern: $X.getParameterNames()
       - pattern: $X.getHeader(...)
+      - pattern: $X.getHeaders(...)
+      - pattern: $X.getHeaderNames()
+      - pattern: $X.getQueryString()
+      - pattern: $X.getCookies()
+      - pattern: $X.getTheParameter(...)
+      - pattern: $X.getTheCookie(...)
+      - pattern: $X.getInputStream()
       - pattern: $X.readLine()
       - pattern: $X.nextLine()
       - pattern: $X.next()
@@ -86,6 +117,11 @@ rules:
       - pattern: $X.replaceAll("\\.\\.", ...)
     pattern-sinks:
       - pattern: new File(...)
+      - pattern: new java.io.File(...)
+      - pattern: new java.io.FileInputStream(...)
+      - pattern: new java.io.FileOutputStream(...)
+      - pattern: new java.io.FileReader(...)
+      - pattern: new java.io.FileWriter(...)
       - pattern: new FileInputStream(...)
       - pattern: new FileOutputStream(...)
       - pattern: new FileReader(...)

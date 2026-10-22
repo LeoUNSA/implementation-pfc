@@ -1,7 +1,7 @@
 """``vulnpipe`` command-line entry point.
 
 Subcommands:
-  corpus build [--only juliet|defects4j]   build the labelled corpus
+  corpus build [--only juliet|owasp|defects4j]   build the labelled corpus
   metrics --findings PATH [--corpus PATH]  score findings vs ground truth
 """
 
@@ -268,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     corpus_sub = corpus.add_subparsers(dest="corpus_command", required=True)
     cbuild = corpus_sub.add_parser("build", help="build labelled corpus")
     cbuild.add_argument(
-        "--only", choices=["juliet", "defects4j"], default=None,
+        "--only", choices=["juliet", "owasp", "defects4j"], default=None,
         help="build a single dataset (default: all implemented)",
     )
     cbuild.set_defaults(func=_cmd_corpus)

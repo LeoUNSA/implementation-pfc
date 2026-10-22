@@ -7,14 +7,14 @@ from pathlib import Path
 from vulnpipe.config import Config
 from vulnpipe.io import write_jsonl
 
-_DATASETS = ("juliet", "defects4j")
+_DATASETS = ("juliet", "owasp", "defects4j")
 
 
 def build(cfg: Config, only: str | None = None) -> dict[str, Path]:
     """Build the requested datasets, writing one JSONL per dataset.
 
-    ``only`` selects a single dataset ("juliet" / "defects4j"); None builds
-    all implemented ones. Returns ``{dataset: output_path}``.
+    ``only`` selects a single dataset ("juliet" / "owasp" / "defects4j");
+    None builds all of them. Returns ``{dataset: output_path}``.
     """
     targets = (only,) if only else _DATASETS
     corpus_dir = cfg.ensure_path("corpus")
@@ -25,6 +25,10 @@ def build(cfg: Config, only: str | None = None) -> dict[str, Path]:
             from vulnpipe.corpus import juliet
 
             snippets = juliet.build(cfg)
+        elif name == "owasp":
+            from vulnpipe.corpus import owasp
+
+            snippets = owasp.build(cfg)
         elif name == "defects4j":
             from vulnpipe.corpus import defects4j
 
