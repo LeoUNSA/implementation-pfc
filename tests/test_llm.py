@@ -55,7 +55,7 @@ class _FakeBackend:
 
 
 def test_run_end_to_end_offline(tmp_path, monkeypatch):
-    monkeypatch.setattr(llm_run, "OllamaBackend", _FakeBackend)
+    monkeypatch.setattr(llm_run, "backend_for", lambda model, host, temperature: _FakeBackend(model, host=host, temperature=temperature))
     cfg = Config(
         root=tmp_path,
         raw={

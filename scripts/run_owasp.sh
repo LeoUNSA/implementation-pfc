@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Full OWASP Benchmark run, in order of priority. Needs Docker and `ollama serve`.
+# Full OWASP Benchmark run, in order of priority. Needs Docker, `ollama serve`
+# and, for the GPT-4o-mini steps, OPENAI_API_KEY.
 # Resumable: a step is skipped when its findings file already exists, so after
 # an interruption just run it again. Each LLM configuration takes ~1 h on an
 # RTX 4060 (772 cases); close other GPU-heavy programs first.
@@ -32,5 +33,18 @@ step "$F/hybrid__semgrep__${DSF}__augment_perSnippet.jsonl" \
 step "$F/${DSF}__cot_perSnippet.jsonl" $V llm run --model "$DS" --strategy cot $C
 step "$F/${DSF}__few-shot_perSnippet.jsonl" $V llm run --model "$DS" --strategy few-shot $C
 step "$F/${CLF}__zero-shot_perSnippet.jsonl" $V llm run --model "$CL" --strategy zero-shot $C
+
+# GPT-4o-mini via API (well under 1 USD for all of these); skipped without a key.
+GPT="gpt-4o-mini"
+if [[ -n ${OPENAI_API_KEY:-} ]]; then
+    step "$F/${GPT}__zero-shot_perSnippet.jsonl" $V llm run --model "$GPT" --strategy zero-shot $C
+    step "$F/hybrid__semgrep__${GPT}__reject_perSnippet.jsonl" \
+        $V hybrid run --sast "$SEMGREP" --model "$GPT" --scope reject $C
+    step "$F/hybrid__semgrep__${GPT}__augment_perSnippet.jsonl" \
+        $V hybrid run --sast "$SEMGREP" --model "$GPT" --scope augment $C
+    step "$F/${GPT}__cot_perSnippet.jsonl" $V llm run --model "$GPT" --strategy cot $C
+else
+    echo "skip: GPT-4o-mini runs (OPENAI_API_KEY not set)"
+fi
 
 $V metrics $C --findings "$F"/*_perSnippet.jsonl

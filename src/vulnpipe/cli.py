@@ -51,21 +51,37 @@ def _cmd_sast(args: argparse.Namespace) -> int:
     return 0
 
 
+def _model_ready(model: str, host: str) -> bool:
+    """Pre-flight: an API key for OpenAI models, a running server + pulled model for Ollama."""
+    import os
+
+    from vulnpipe.llm.ollama import installed_models, is_available
+    from vulnpipe.llm.openai import is_openai_model
+
+    if is_openai_model(model):
+        if not os.environ.get("OPENAI_API_KEY"):
+            print("error: OPENAI_API_KEY is not set.", file=sys.stderr)
+            return False
+        return True
+    if not is_available(host):
+        print(f"error: no Ollama server at {host}", file=sys.stderr)
+        print("start it with `ollama serve`.", file=sys.stderr)
+        return False
+    have = installed_models(host)
+    if model not in have:
+        print(f"error: model {model!r} not pulled. Have: {have}", file=sys.stderr)
+        print(f"pull it with `ollama pull {model}`.", file=sys.stderr)
+        return False
+    return True
+
+
 def _cmd_llm(args: argparse.Namespace) -> int:
     from vulnpipe.io import load_records
     from vulnpipe.llm import run as llm_run
-    from vulnpipe.llm.ollama import installed_models, is_available
     from vulnpipe.schemas import Snippet
 
     cfg = config_mod.load(args.config)
-    if not is_available(args.host):
-        print(f"error: no Ollama server at {args.host}", file=sys.stderr)
-        print("start it with `ollama serve`.", file=sys.stderr)
-        return 1
-    have = installed_models(args.host)
-    if args.model not in have:
-        print(f"error: model {args.model!r} not pulled. Have: {have}", file=sys.stderr)
-        print(f"pull it with `ollama pull {args.model}`.", file=sys.stderr)
+    if not _model_ready(args.model, args.host):
         return 1
 
     corpus_path = (
@@ -87,18 +103,10 @@ def _cmd_llm(args: argparse.Namespace) -> int:
 def _cmd_hybrid(args: argparse.Namespace) -> int:
     from vulnpipe.hybrid import run as hybrid_run
     from vulnpipe.io import load_records
-    from vulnpipe.llm.ollama import installed_models, is_available
     from vulnpipe.schemas import Finding, Snippet
 
     cfg = config_mod.load(args.config)
-    if not is_available(args.host):
-        print(f"error: no Ollama server at {args.host}", file=sys.stderr)
-        print("start it with `ollama serve`.", file=sys.stderr)
-        return 1
-    have = installed_models(args.host)
-    if args.model not in have:
-        print(f"error: model {args.model!r} not pulled. Have: {have}", file=sys.stderr)
-        print(f"pull it with `ollama pull {args.model}`.", file=sys.stderr)
+    if not _model_ready(args.model, args.host):
         return 1
 
     corpus_path = (
@@ -287,7 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
     llm = sub.add_parser("llm", help="run a local LLM over the corpus")
     llm_sub = llm.add_subparsers(dest="llm_command", required=True)
     lrun = llm_sub.add_parser("run", help="run one (model, strategy) detector")
-    lrun.add_argument("--model", required=True, help="Ollama model tag, e.g. deepseek-coder:6.7b-instruct")
+    lrun.add_argument("--model", required=True, help="Ollama tag (e.g. deepseek-coder:6.7b-instruct) or OpenAI model (e.g. gpt-4o-mini)")
     lrun.add_argument(
         "--strategy", choices=["zero-shot", "cot", "few-shot"], default="zero-shot",
         help="prompting strategy (static-augmented is the hybrid phase)",
@@ -306,7 +314,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--sast", required=True, nargs="+",
         help="one or more SAST *_perSnippet.jsonl files (unioned as candidates)",
     )
-    hrun.add_argument("--model", required=True, help="Ollama model tag (the confirmer)")
+    hrun.add_argument("--model", required=True, help="confirmer: Ollama tag or OpenAI model (gpt-*)")
     hrun.add_argument(
         "--scope", choices=["reject", "augment"], default="reject",
         help="reject = confirmer only; augment = also cold-detect SAST-negatives",

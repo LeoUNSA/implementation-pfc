@@ -37,6 +37,7 @@ from vulnpipe.config import Config
 from vulnpipe.llm import prompts
 from vulnpipe.llm.base import Verdict, parse_verdict
 from vulnpipe.llm.ollama import OllamaBackend
+from vulnpipe.llm.openai import backend_for
 from vulnpipe.schemas import SAFE, VULNERABLE, Finding, Snippet
 
 SCOPES = ("reject", "augment")
@@ -121,7 +122,7 @@ def run(
     cfg_runs = int(runs if runs is not None else llm_cfg.get("runs_per_snippet", 1))
     n_runs = cfg_runs if temp > 0 else 1
 
-    backend = OllamaBackend(model, host=host, temperature=temp)
+    backend = backend_for(model, host=host, temperature=temp)
 
     candidates = sast_candidates(sast_findings)
     sast_tools = sorted({f.tool for f in sast_findings})

@@ -58,7 +58,7 @@ class _FakeBackend:
 
 
 def test_reject_scope_prunes_false_positive(tmp_path, monkeypatch):
-    monkeypatch.setattr(hybrid_run, "OllamaBackend", _FakeBackend)
+    monkeypatch.setattr(hybrid_run, "backend_for", lambda model, host, temperature: _FakeBackend(model, host=host, temperature=temperature))
     cfg = _cfg(tmp_path)
     corpus = [
         Snippet("a", "89", VULNERABLE, "x.executeQuery(q);", "a.java"),  # real, SAST flags -> confirmed
@@ -79,7 +79,7 @@ def test_reject_scope_prunes_false_positive(tmp_path, monkeypatch):
 
 
 def test_augment_scope_recovers_sast_negative(tmp_path, monkeypatch):
-    monkeypatch.setattr(hybrid_run, "OllamaBackend", _FakeBackend)
+    monkeypatch.setattr(hybrid_run, "backend_for", lambda model, host, temperature: _FakeBackend(model, host=host, temperature=temperature))
     cfg = _cfg(tmp_path)
     corpus = [
         Snippet("c", "89", VULNERABLE, "y.executeQuery(z);", "c.java"),  # SAST misses; augment catches it
