@@ -119,3 +119,34 @@ def test_semgrep_sarif_uses_namespaced_rule_ids(tmp_path):
     issues = parse_sarif(p, "semgrep", RULE_CWE, only_mapped=True)
     assert len(issues) == 1
     assert issues[0].cwe == "89" and issues[0].snippet_id == "juliet_CWE89__a__bad"
+
+
+def test_parse_text_traces_reads_source_steps_and_sink():
+    from vulnpipe.sast.semgrep import parse_text_traces
+
+    text = """
+    /src/owasp_CWE89__BenchmarkTest00008.java
+   ❯❯❱ rules.sqli-taint-jdbc
+          SQL Injection (CWE-89): untrusted input reaches a JDBC execute method.
+
+           29┆ java.sql.CallableStatement statement = connection.prepareCall(sql);
+
+          Taint comes from:
+
+           22┆ param = request.getHeader("TestCase");
+
+          Taint flows through these intermediate variables:
+
+           22┆ param = request.getHeader("TestCase");
+
+           25┆ String sql = "{call " + param + "}";
+
+                This is how taint reaches the sink:
+
+           29┆ java.sql.CallableStatement statement = connection.prepareCall(sql);
+
+            ⋮┆----------------------------------------
+           30┆ java.sql.ResultSet rs = statement.executeQuery();
+"""
+    t = parse_text_traces(text)["owasp_CWE89__BenchmarkTest00008"]
+    assert t == {"source": [22], "steps": [22, 25], "sink": [29, 30]}

@@ -125,10 +125,15 @@ def _cmd_hybrid(args: argparse.Namespace) -> int:
             return 1
         sast_findings.extend(load_records(fpath, Finding.from_dict))
 
+    traces = None
+    if args.traces:
+        from vulnpipe.sast.semgrep import parse_text_traces
+        traces = parse_text_traces(Path(args.traces).read_text(encoding="utf-8"))
+
     hybrid_run.run(
         cfg, corpus, sast_findings, model=args.model, scope=args.scope,
         runs=args.runs, temperature=args.temperature, limit=args.limit,
-        host=args.host,
+        host=args.host, traces=traces, hints=args.hints,
     )
     return 0
 
@@ -324,6 +329,11 @@ def build_parser() -> argparse.ArgumentParser:
     hrun.add_argument("--limit", type=int, default=None, help="only the first N snippets (smoke test)")
     hrun.add_argument("--host", default="http://localhost:11434", help="Ollama server URL")
     hrun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
+    hrun.add_argument("--traces", default=None,
+                      help="Semgrep text output with --dataflow-traces (scan/semgrep_traces.txt); "
+                           "switches the confirmer to the trace prompt")
+    hrun.add_argument("--hints", action="store_true",
+                      help="with --traces: list typical false-alarm causes in the prompt")
     hrun.set_defaults(func=_cmd_hybrid)
 
     metrics = sub.add_parser("metrics", help="score findings vs ground truth")

@@ -88,3 +88,24 @@ def test_augment_scope_recovers_sast_negative(tmp_path, monkeypatch):
     by = {r["snippet_id"]: r for r in (json.loads(l) for l in out.read_text().splitlines())}
     assert by["c"]["verdict"] == VULNERABLE          # cold zero-shot recovered it
     assert by["c"]["tool"] == "hybrid____fake_1b__augment"
+
+
+def test_traces_switch_confirmer_to_trace_prompt(tmp_path, monkeypatch):
+    seen = []
+
+    class _Recorder(_FakeBackend):
+        def generate(self, prompt, force_json=True):
+            seen.append(prompt)
+            return super().generate(prompt, force_json)
+
+    monkeypatch.setattr(hybrid_run, "backend_for", lambda model, host, temperature: _Recorder(model))
+    cfg = _cfg(tmp_path)
+    corpus = [Snippet("a", "89", VULNERABLE, "x.executeQuery(q);", "a.java")]
+    sast = [Finding("a", "semgrep", VULNERABLE, cwe="89", line=1)]
+    traces = {"a": {"source": [1], "steps": [1], "sink": [1]}}
+    out = hybrid_run.run(cfg, corpus, sast, model="fake:1b", scope="reject", traces=traces)
+    row = json.loads(out.read_text().splitlines()[0])
+    assert "reported path" in seen[0] and "  1: x.executeQuery(q);" in seen[0]
+    assert row["tool"] == "hybrid__semgrep__fake_1b__reject__trace"
+    assert "replaced by a constant" not in seen[0]  # hints are opt-in
+    assert row["prompt_strategy"] == "trace-confirm"

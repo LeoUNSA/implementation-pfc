@@ -14,6 +14,7 @@ one ``Finding`` per snippet via the shared ``sast.base`` rule.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Sequence
 
@@ -92,7 +93,46 @@ def run_semgrep(cfg: Config, corpus: Sequence[Snippet]) -> list[Finding]:
             f"Semgrep failed (rc={rc}).\nstdout:\n{out}\nstderr:\n{err}"
         )
 
+    # Second pass for the hybrid confirmer: same scan, text output with traces.
+    trace_args = [a for a in args if a not in ("--sarif", "--output", f"/src/{sarif_name}")]
+    trace_args[-1:-1] = ["--dataflow-traces", "--max-lines-per-finding", "50",
+                         "--max-chars-per-line", "400"]
+    _, trace_out, _, _ = container.run_container(image, trace_args, mounts)
+    (scan_dir / "semgrep_traces.txt").write_text(trace_out, encoding="utf-8")
+
     issues = container.parse_sarif(
         scan_dir / sarif_name, TOOL, RULE_CWE, only_mapped=True
     )
     return aggregate_findings(corpus, TOOL, issues, target_cwes, elapsed_ms)
+
+
+# Semgrep OSS only prints dataflow traces in its text output (JSON and SARIF
+# leave them out), so the trace for the hybrid confirmer is read from there:
+#   semgrep scan --dataflow-traces --max-lines-per-finding 50 ... > traces.txt
+# Only the line numbers are kept; the prompt re-reads the code itself.
+_TRACE_FILE = re.compile(r"^\s+/src/(\S+)\.java$")
+_TRACE_LINE = re.compile(r"^\s*(\d+)┆")
+_TRACE_MODES = (("Taint comes from", "source"),
+                ("intermediate variables", "steps"),
+                ("reaches the sink", "sink"))
+
+
+def parse_text_traces(text: str) -> dict[str, dict[str, list[int]]]:
+    """``{snippet_id: {"source": [...], "steps": [...], "sink": [...]}}``."""
+    traces: dict[str, dict[str, list[int]]] = {}
+    cur, mode = None, "sink"
+    for raw in text.splitlines():
+        if m := _TRACE_FILE.match(raw):
+            cur = traces.setdefault(m.group(1), {"source": [], "steps": [], "sink": []})
+            mode = "sink"
+        elif cur is None:
+            continue
+        elif raw.strip().startswith(("❯", "⋮┆")):  # new finding: its match line is the sink
+            mode = "sink"
+        elif m := _TRACE_LINE.match(raw):
+            n = int(m.group(1))
+            if n not in cur[mode]:
+                cur[mode].append(n)
+        else:
+            mode = next((k for marker, k in _TRACE_MODES if marker in raw), mode)
+    return traces

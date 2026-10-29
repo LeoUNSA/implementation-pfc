@@ -51,8 +51,12 @@ def _sast_tag(tools: Sequence[str]) -> str:
     return "+".join(sorted(tools))
 
 
-def _tool_name(sast_tools: Sequence[str], model: str, scope: str) -> str:
-    return f"hybrid__{_sast_tag(sast_tools)}__{_model_tag(model)}__{scope}"
+def _tool_name(sast_tools: Sequence[str], model: str, scope: str,
+               trace: bool = False, hints: bool = False) -> str:
+    name = f"hybrid__{_sast_tag(sast_tools)}__{_model_tag(model)}__{scope}"
+    if trace:
+        name += "__trace-hints" if hints else "__trace"
+    return name
 
 
 def sast_candidates(
@@ -105,12 +109,17 @@ def run(
     temperature: Optional[float] = None,
     limit: Optional[int] = None,
     host: str = "http://localhost:11434",
+    traces: Optional[dict[str, dict[str, list[int]]]] = None,
+    hints: bool = False,
 ) -> Path:
     """Run the hybrid pipeline → ``findings/hybrid__..._perSnippet.jsonl``.
 
     ``sast_findings`` is the merged candidate input (one or more SAST tools'
     per-snippet findings). ``scope`` is ``reject`` (confirmer only) or
-    ``augment`` (also cold-detect SAST-negatives).
+    ``augment`` (also cold-detect SAST-negatives). ``traces`` (Semgrep's
+    dataflow traces, ``sast.semgrep.parse_text_traces``) switches the
+    confirmer to the ``trace_confirm`` prompt for every candidate that has one;
+    ``hints`` adds that prompt's list of typical false-alarm causes.
     """
     from vulnpipe.io import write_jsonl
 
@@ -126,7 +135,7 @@ def run(
 
     candidates = sast_candidates(sast_findings)
     sast_tools = sorted({f.tool for f in sast_findings})
-    tool = _tool_name(sast_tools, model, scope)
+    tool = _tool_name(sast_tools, model, scope, trace=traces is not None, hints=hints)
 
     eval_set = list(corpus)
     if limit is not None:
@@ -145,7 +154,13 @@ def run(
         if cand is not None:
             # Confirmer path: confirm or reject this specific SAST alert.
             cwe = cand.cwe or (s.cwe if s.cwe in ("89", "22") else "89")
-            prompt = prompts.static_augmented(s.code, cand.tool, str(cwe), cand.line)
+            trace = (traces or {}).get(s.snippet_id)
+            if trace:
+                strategy = "trace-confirm"
+                prompt = prompts.trace_confirm(s.code, str(cwe), trace, hints=hints)
+            else:
+                strategy = "static-augmented"
+                prompt = prompts.static_augmented(s.code, cand.tool, str(cwe), cand.line)
             verdict, _, tin, tout, ms = _query(backend, prompt, n_runs, force_json=True)
             n_calls += n_runs
             per_snippet.append(
@@ -153,7 +168,7 @@ def run(
                     snippet_id=s.snippet_id, tool=tool, verdict=verdict,
                     cwe=str(cwe) if verdict == VULNERABLE else None,
                     line=cand.line if verdict == VULNERABLE else None,
-                    rule_id=cand.rule_id, prompt_strategy="static-augmented",
+                    rule_id=cand.rule_id, prompt_strategy=strategy,
                     explanation=f"confirmer over {cand.tool} alert",
                     elapsed_ms=ms, tokens_in=tin, tokens_out=tout,
                 )

@@ -14,6 +14,7 @@ prompts that must emit prose reasoning before the JSON answer.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -32,6 +33,11 @@ class GenResult:
 
 class OllamaError(RuntimeError):
     pass
+
+
+# Reasoning models think before answering (Ollama returns the thinking in a
+# separate field); they need room for it, so they get a larger budget.
+REASONING_PREFIXES = ("qwen3", "gpt-oss", "deepseek-r1")
 
 
 class OllamaBackend:
@@ -62,24 +68,40 @@ class OllamaBackend:
                 "num_predict": self.num_predict,
             },
         }
+        if self.model.startswith(REASONING_PREFIXES):
+            payload["think"] = True
+            payload["options"].update(num_predict=4096, num_ctx=8192)
+        # 4096 thinking tokens at ~14 tok/s on the RTX 4060 is ~5 min by itself.
+        timeout = max(self.timeout, 900) if "think" in payload else self.timeout
         if force_json:
             payload["format"] = "json"
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.host}/api/generate",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as e:
-            raise OllamaError(
-                f"Ollama request failed for model {self.model!r}: {e}. "
-                f"Is `ollama serve` running and the model pulled?"
-            ) from e
+        # Ollama's JSON grammar sometimes fails mid-generation with a bare 500,
+        # and at temperature 0 the same request fails the same way again. The
+        # retry drops JSON mode; parse_verdict also reads free text.
+        for attempt in range(2):
+            req = urllib.request.Request(
+                f"{self.host}/api/generate",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code < 500 or attempt == 1:
+                    raise OllamaError(
+                        f"Ollama request failed for model {self.model!r}: {e}."
+                    ) from e
+                payload.pop("format", None)
+                time.sleep(2)
+            except urllib.error.URLError as e:
+                raise OllamaError(
+                    f"Ollama request failed for model {self.model!r}: {e}. "
+                    f"Is `ollama serve` running and the model pulled?"
+                ) from e
 
         # total_duration is nanoseconds; convert to ms.
         dur_ns = body.get("total_duration")

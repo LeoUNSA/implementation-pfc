@@ -55,6 +55,45 @@ def static_augmented(
     )
 
 
+_CWE_NAME = {"89": "SQL Injection", "22": "Path Traversal"}
+
+
+def trace_confirm(code: str, cwe: str, trace: dict[str, list[int]], hints: bool = True) -> str:
+    """Hybrid core with the alert's dataflow trace and line-numbered code.
+
+    The trace only covers the lines on the tainted path; the full code stays
+    in the prompt because what makes an alert false (a branch that overwrites
+    the value, a sanitizer) is usually off that path. ``analysis`` comes
+    before ``verdict`` so the model reasons before it commits. ``hints=False``
+    drops the list of typical false-alarm causes (ablation).
+    """
+    lines = code.splitlines()
+    numbered = "\n".join(f"{i:>3}: {l}" for i, l in enumerate(lines, 1))
+
+    def show(ns: list[int]) -> str:
+        return "\n".join(f"  {n}: {lines[n - 1].strip()}" for n in ns if 0 < n <= len(lines))
+
+    return (
+        f"{_SYSTEM}\n\n"
+        f"A taint analyzer reported a possible CWE-{cwe} ({_CWE_NAME.get(cwe, '')}) "
+        f"in the code below. Its reported path is:\n"
+        f"Source:\n{show(trace['source'])}\n"
+        f"Through:\n{show(trace['steps'])}\n"
+        f"Sink:\n{show(trace['sink'])}\n\n"
+        "Taint analyzers report many false alarms. Follow the value that "
+        "actually arrives at the sink at run time"
+        + (": it may be replaced by a constant, chosen by a condition whose "
+           "outcome is fixed, sanitized, or taken from a different element "
+           "than the tainted one" if hints else "")
+        + '. Answer "vulnerable" only if user-controlled data reaches the sink '
+        "unsanitized.\n\n"
+        "Respond ONLY with a JSON object:\n"
+        '{ "analysis": "<2-3 sentences: which value reaches the sink and why>", '
+        '"verdict": "vulnerable" | "safe" }\n\n'
+        f"CODE:\n{numbered}"
+    )
+
+
 BUILDERS = {
     "zero-shot": zero_shot,
     "cot": cot,

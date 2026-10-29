@@ -1,0 +1,729 @@
+# vulnpipe: how the implementation works
+
+This file explains the `vulnpipe` package end to end: what each stage does,
+which command runs it, which file it writes, and where the numbers in the
+thesis come from. It was written from the code (October 2026); where the
+notes in `docs/` disagree, trust the code and this file.
+
+## 1. What the project does
+
+`vulnpipe` compares three families of vulnerability detectors on Java code
+for two CWEs, CWE-89 (SQL Injection) and CWE-22 (Path Traversal):
+
+1. **SAST**: Semgrep (taint mode, custom rules) and PMD (built-in rules and
+   custom syntactic XPath rules), run in pinned Docker images.
+2. **LLMs**: local models served by Ollama, asked "is this code vulnerable?"
+   with a JSON answer format.
+3. **Hybrid**: SAST produces candidate alerts, and an LLM acts as a
+   *confirmer* that keeps or rejects each alert.
+
+Every detector is forced into the same output record (a `Finding` with a
+binary `verdict` per snippet), so one metrics stage can score all of them
+against the same ground truth (`Snippet.label`). The main corpus is OWASP
+Benchmark v1.2 (772 servlet files); Juliet is a secondary/control corpus.
+
+```
+                     data/owasp-benchmark (sparse git clone)
+                     expectedresults-1.2.csv + BenchmarkTest*.java
+                                   |
+                     vulnpipe corpus build --only owasp
+                     (corpus/owasp.py: filter sqli+pathtraver,
+                      neutralise(): strip comments, rename test, ...)
+                                   |
+                                   v
+                          corpus/owasp.jsonl   (772 Snippets, ground truth)
+                                   |
+        +--------------------------+---------------------------+
+        |                          |                           |
+  vulnpipe sast run           vulnpipe llm run                 |
+  (materialize .java,         (prompt per snippet,             |
+   docker PMD / Semgrep,       Ollama, parse JSON)             |
+   SARIF -> Issues ->          |                               |
+   1 Finding per snippet)      |                               |
+        |                          v                           |
+        |              <model>__<strategy>_perSnippet.jsonl     |
+        v                     llm_runs/<tool>_runs.jsonl        |
+  semgrep_perSnippet.jsonl                                     |
+  pmd-{vanilla,custom}_perSnippet.jsonl                        |
+  scan/semgrep_traces.txt  (text pass with --dataflow-traces)  |
+        |                                                      |
+        +------> vulnpipe hybrid run --sast ... [--traces] <----+
+                 (candidates = SAST verdict 1 -> LLM confirm/reject;
+                  non-candidates: safe (reject) or zero-shot (augment))
+                                   |
+                                   v
+                 hybrid__<sast>__<model>__<scope>[__trace|__trace-hints]_perSnippet.jsonl
+                                   |
+        all *_perSnippet.jsonl ----+
+                                   v
+                 vulnpipe metrics --findings ... [--compare SAST LLM HYB]
+                 -> metrics/owasp/per_tool.csv  (P, R, FPR, F1, CI, TP/FP/TN/FN)
+                 -> stdout: HIS + McNemar
+                                   |
+                                   v
+                 vulnpipe figures ...  /  scripts/thesis_figures.py
+
+  side path: scripts/pilot.py (60 Semgrep alerts, Youden J) to pick the
+  confirmer model and prompt before spending hours on a full hybrid run.
+```
+
+## 2. Directory map
+
+```
+implementation/
+  pyproject.toml          package metadata; console script `vulnpipe = vulnpipe.cli:main`
+  config.yaml             default config (Juliet paths: findings/, metrics/, figures/)
+  config.owasp.yaml       same, but outputs go to findings/owasp/, metrics/owasp/, figures/owasp/
+  rulesets/
+    semgrep_cwe89_cwe22.yml   Semgrep taint rules (sources, sanitizers, sinks)
+    pmd_cwe89_cwe22.xml       PMD XPath rules (syntactic: non-literal arg to a sink)
+  src/vulnpipe/
+    cli.py                argparse front end, one function per subcommand
+    config.py             loads YAML, resolves paths relative to the config file
+    io.py                 JSONL read/write
+    schemas.py            Snippet, Finding, Issue dataclasses (the contract)
+    corpus/               build.py, owasp.py, juliet.py, sanitize.py, javaparse.py, defects4j.py (stub)
+    sast/                 base.py, container.py, materialize.py, pmd.py, semgrep.py
+    llm/                  base.py, prompts.py, ollama.py, openai.py, run.py, mock.py
+    hybrid/run.py         the SAST -> LLM confirmer
+    metrics/              join.py (findings x truth), compute.py (P/R/F1, HIS, McNemar, bootstrap)
+    figures/plots.py      PR scatter, cost vs F1, TP Venn
+  scripts/
+    run_owasp.sh          full OWASP run, resumable per step
+    pilot.py              confirmer pilot on 60 Semgrep alerts
+    thesis_figures.py     Chapter 4 PDFs into ../Template/Graficos/
+  tests/                  pytest suite (46 tests, offline, no Docker/Ollama)
+  corpus/                 owasp.jsonl, juliet.jsonl (ground truth, tracked)
+  findings/               Juliet results (root) and findings/owasp/ (main results)
+    owasp/llm_runs/       one row per individual LLM call
+    owasp/pilot/          pilot answers, one file per (model, variant)
+    owasp/scan/           materialized .java files, SARIF, semgrep_traces.txt (git-ignored)
+  metrics/per_tool.csv          Juliet table
+  metrics/owasp/per_tool.csv    OWASP table (the thesis numbers)
+  figures/                generated plots (git-ignored)
+  data/                   raw downloads: Juliet zip, owasp-benchmark clone (git-ignored)
+  docs/                   older local notes (git-ignored, partly outdated)
+```
+
+## 3. End-to-end process with exact commands
+
+Run everything from `implementation/`. Use the venv binary
+(`.venv/bin/vulnpipe`) or activate the venv. For OWASP always pass both
+`--config config.owasp.yaml` and `--corpus corpus/owasp.jsonl` (see
+gotchas: every subcommand defaults to `corpus/juliet.jsonl`).
+
+Shorthand used below:
+
+```bash
+V=".venv/bin/vulnpipe --config config.owasp.yaml"
+C="--corpus corpus/owasp.jsonl"
+F=findings/owasp
+```
+
+### 3.1 Fetch OWASP Benchmark and build the corpus
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/OWASP-Benchmark/BenchmarkJava.git data/owasp-benchmark
+git -C data/owasp-benchmark sparse-checkout set \
+    src/main/java/org/owasp/benchmark/testcode src/main/java/org/owasp/benchmark/helpers
+$V corpus build --only owasp            # -> corpus/owasp.jsonl (772 rows)
+```
+
+Juliet: `.venv/bin/vulnpipe corpus build --only juliet` downloads the NIST
+zip on first use and writes `corpus/juliet.jsonl` (500 method-level
+snippets, balanced).
+
+### 3.2 SAST (needs Docker)
+
+```bash
+$V sast run --tool pmd --variant both $C     # -> $F/pmd-vanilla_perSnippet.jsonl, $F/pmd-custom_perSnippet.jsonl
+$V sast run --tool semgrep $C                # -> $F/semgrep_perSnippet.jsonl + $F/scan/semgrep_traces.txt
+```
+
+### 3.3 LLM as a standalone detector (needs `ollama serve` and the model pulled)
+
+```bash
+$V llm run --model deepseek-coder:6.7b-instruct --strategy zero-shot $C
+$V llm run --model qwen3:8b --strategy zero-shot $C
+# options: --strategy zero-shot|cot|few-shot, --limit N (smoke test),
+#          --runs N --temperature T (majority vote; only if T > 0), --host URL
+```
+
+Output: `$F/<model_tag>__<strategy>_perSnippet.jsonl` plus
+`$F/llm_runs/<model_tag>__<strategy>_runs.jsonl`. The model tag replaces
+`:` and `/` with `_` (`qwen3:8b` -> `qwen3_8b`).
+
+### 3.4 Pilot: choose the confirmer before the full hybrid run
+
+```bash
+.venv/bin/python scripts/pilot.py --model qwen3:8b --variants trace trace-nohints zero-shot
+# --n 30 (alerts per class), --seed 7
+```
+
+Prints `TPR FPR J unparsed` per variant and appends answers to
+`$F/pilot/<model_tag>__<variant>.jsonl`. See section 4.8.
+
+### 3.5 Hybrid (needs Semgrep findings and Ollama)
+
+```bash
+SEMGREP=$F/semgrep_perSnippet.jsonl
+TRACES=$F/scan/semgrep_traces.txt
+# main configuration used in the thesis:
+$V hybrid run --sast $SEMGREP --traces $TRACES --model qwen3:8b --scope reject $C
+# variants:
+$V hybrid run --sast $SEMGREP --traces $TRACES --hints --model qwen3:8b --scope reject $C
+$V hybrid run --sast $SEMGREP --traces $TRACES --model qwen3:8b --scope augment $C
+$V hybrid run --sast $SEMGREP --model deepseek-coder:6.7b-instruct --scope reject $C   # no traces: old prompt
+```
+
+`--sast` accepts several files (union of their alerts). Output name:
+`hybrid__<sast tools joined by +>__<model_tag>__<scope>[__trace|__trace-hints]_perSnippet.jsonl`.
+
+### 3.6 Metrics
+
+```bash
+$V metrics $C --findings $F/*_perSnippet.jsonl \
+    --compare semgrep qwen3_8b__zero-shot hybrid__semgrep__qwen3_8b__reject__trace
+```
+
+Writes `metrics/owasp/per_tool.csv` and prints per-tool P/R/F1 with CI.
+`--compare SAST LLM HYBRID` (tool names, not file paths) also prints HIS
+and two McNemar tests (hybrid vs SAST, hybrid vs LLM).
+
+### 3.7 Figures
+
+```bash
+$V figures $C --findings $F/*_perSnippet.jsonl --format pdf \
+    --venn semgrep qwen3_8b__zero-shot hybrid__semgrep__qwen3_8b__reject__trace
+# -> figures/owasp/pr_scatter.pdf, cost_vs_f1.pdf, venn_tp.pdf (needs .[figures] extra)
+.venv/bin/python scripts/thesis_figures.py
+# -> ../Template/Graficos/corpus_owasp.pdf, fuga_juliet.pdf, resultados_owasp.pdf, trampas_owasp.pdf (needs LaTeX: text.usetex=True)
+```
+
+### 3.8 The whole OWASP run in one script
+
+```bash
+scripts/run_owasp.sh 2>&1 | tee run_owasp.log
+```
+
+Order: corpus, PMD (both), Semgrep, DeepSeek zero-shot, DeepSeek hybrid
+reject, DeepSeek hybrid augment, Qwen3 hybrid reject+trace, Qwen3 zero-shot,
+Qwen3 hybrid reject+trace+hints, Qwen3 hybrid augment+trace, then
+`metrics` over every `$F/*_perSnippet.jsonl`. Each `step` is skipped if its
+output file exists, so rerunning after an interruption continues from the
+first missing step. Timing comment in the script: Qwen3 takes about 30 s per
+call, so each Qwen3 hybrid step is about 5 h and Qwen3 zero-shot about 8 h.
+
+## 4. Module reference
+
+### 4.1 Core: `schemas.py`, `io.py`, `config.py`, `cli.py`
+
+- `schemas.py`
+  - `Snippet(snippet_id, cwe, label, code, file, line)`: ground truth.
+    `label` must be 0 (safe) or 1 (vulnerable); `__post_init__` rejects
+    anything else. Constants `VULNERABLE = 1`, `SAFE = 0`.
+  - `Finding(snippet_id, tool, verdict, cwe, line, rule_id, confidence,
+    explanation, elapsed_ms, tokens_in, tokens_out, cost_usd,
+    prompt_strategy, run_idx)`: one detector's verdict on one snippet.
+    Only `snippet_id`, `tool`, `verdict` are required; `tool` is the
+    detector's identity in every table.
+  - `Issue`: a raw SAST alert before aggregation (several per snippet
+    possible).
+  - `from_dict` uses `_coerce`, which drops unknown keys, so extra columns
+    in a JSONL file do not break loading.
+- `io.py`: `read_jsonl`, `load_records(path, factory)`, `write_jsonl`
+  (strips `None` fields, creates parent dirs, writes the whole file at once).
+- `config.py`: `load(path)` returns `Config(root, raw)`. With `--config`,
+  the root is the config file's directory; without it,
+  `find_project_root()` walks up from the cwd looking for `config.yaml`.
+  `Config.path(key)` resolves `paths.<key>`; `ensure_path` also creates it.
+  Required top-level keys: `cwes, paths, corpus, metrics, llm`.
+- `cli.py`: `build_parser()` defines the subcommands
+  `corpus build`, `sast run`, `llm run`, `hybrid run`, `metrics`,
+  `figures`; each maps to `_cmd_<name>`. `_model_ready()` is the pre-flight
+  for LLM commands: checks that Ollama answers (`is_available`) and the model
+  is pulled (`installed_models`), or that `OPENAI_API_KEY` is set for
+  `gpt-*`/`o1`/`o3`/`o4` names.
+
+### 4.2 Corpus: `corpus/`
+
+- `build.py`: `build(cfg, only)` calls the dataset builder and writes
+  `corpus/<name>.jsonl`. Datasets: `juliet`, `owasp`, `defects4j`.
+- `owasp.py` (main corpus):
+  - `read_expected(csv_path)`: reads `expectedresults-1.2.csv`, keeps
+    categories `sqli` -> `"89"` and `pathtraver` -> `"22"`
+    (`CATEGORY_CWE`), label from the `real vulnerability` column.
+  - `build(cfg)`: one `Snippet` per test case; the unit is the whole
+    servlet file (`line=1`), `snippet_id = owasp_CWE<cwe>__BenchmarkTestNNNNN`.
+  - `neutralise(code)`: removes label hints before anything sees the code:
+    `strip_comments`; `@WebServlet(value="/sqli-00/...")` -> `"/app/TestCase"`;
+    category paths `/sqli-NN/` -> `/app/`; literals `"safe!"`, `"alsosafe"`,
+    `"moresafe"` -> `"constant"`; `" SafeStuff"` -> `" SomeStuff"`;
+    `"This_should_always_happen"`/`"This should never happen"` ->
+    `"fixed_value"`; `BenchmarkTestNNNNN` -> `TestCase`.
+- `sanitize.py`: `strip_comments(code)` removes `//` and `/* */` comments
+  with a string-aware regex (a `//` inside a string literal survives) and
+  drops the blank lines left behind.
+- `juliet.py` (control corpus): `download`, `extract_archive`,
+  `_build_prefix_map` (canonical CWE-22 maps to Juliet's CWE23 and CWE36
+  directories), `iter_testcase_files`, `snippets_from_file` (`bad()` ->
+  label 1, `good*()` -> label 0, method plus 20 lines of context),
+  `balanced_sample` (stratified by CWE, seed 42, 250 + 250).
+  Note: Juliet snippets are **not** passed through `strip_comments`.
+- `javaparse.py`: `extract_methods(source)` (tree-sitter-java, with a
+  brace-matching regex fallback) and `slice_with_context`.
+- `defects4j.py`: stub, raises `NotImplementedError`.
+
+### 4.3 SAST: `sast/`
+
+- `base.py`: `SASTRunner` protocol and `aggregate_to_finding()`. The
+  aggregation rule: a snippet is vulnerable iff the tool emits at least one
+  issue in it whose rule maps to a target CWE (issues with no CWE count as
+  relevant). The first relevant issue supplies `rule_id`, `line`,
+  `explanation`.
+- `container.py`: `ensure_docker()`, `run_container(image, args, mounts)`
+  (`docker run --rm -v host:container ...`, returns rc, stdout, stderr,
+  elapsed ms), `parse_sarif(path, tool, rule_cwe, only_mapped=True)`
+  (SARIF -> `Issue`s; the snippet id is the artifact file name without
+  `.java`; unmapped rules are dropped).
+- `materialize.py`: `materialize(snippets, scan_dir, resolve_source)`
+  deletes old `*.java` in `scan_dir` and writes `<snippet_id>.java` per
+  snippet. `wrap_snippet()`: a snippet that is already a full compilation
+  unit (OWASP: has `package`/`import` and balanced braces) is written as is;
+  a Juliet method slice is re-extracted from the original file
+  (`build_source_index`, `_brace_complete_method`) and wrapped as
+  `final class S { <method> }` so PMD can parse it.
+- `pmd.py`: `VARIANTS` holds `pmd-vanilla` (built-in
+  `category/java/security.xml`, empty rule->CWE map) and `pmd-custom`
+  (`/rules/pmd_cwe89_cwe22.xml`, rules `SqlInjectionConcatExec` -> 89,
+  `PathTraversalFileSink` -> 22). `run_variant()` materializes, runs
+  `pmd check -f sarif`, accepts exit codes 0/4/5, parses SARIF, and
+  `aggregate_findings()` emits one `Finding` per corpus snippet (no issue ->
+  safe). `elapsed_ms` is the total batch time copied to every row.
+- `semgrep.py`: `RULE_CWE` maps the SARIF rule ids `rules.sqli-taint-jdbc`
+  -> 89 and `rules.path-traversal-taint-file` -> 22 (Semgrep prefixes ids
+  with `rules.`). `run_semgrep()` does two container runs over the same
+  directory:
+  1. `semgrep scan --config ... --sarif --output /src/semgrep.sarif` -> the
+     verdicts.
+  2. the same scan in text mode with `--dataflow-traces
+     --max-lines-per-finding 50 --max-chars-per-line 400`; stdout is saved
+     to `scan/semgrep_traces.txt`. Semgrep OSS does not include traces in
+     JSON or SARIF, which is why this second pass exists.
+
+  `parse_text_traces(text)` reads that text file and returns
+  `{snippet_id: {"source": [lines], "steps": [lines], "sink": [lines]}}`.
+  It tracks the current file (`/src/<id>.java`), switches mode on the
+  markers "Taint comes from" / "intermediate variables" / "reaches the
+  sink", and collects the numbers before `┆`. Only line numbers are kept;
+  the prompt re-reads the code.
+
+Rulesets:
+- `semgrep_cwe89_cwe22.yml`: `mode: taint`. Sources: request parameters,
+  headers, cookies, query string, `getTheParameter`/`getTheCookie` (OWASP
+  helpers), `System.getenv`, `getProperty`, readers, `$A[$I]`. Sanitizers
+  for SQLi: `Integer.parseInt`, `Long.parseLong`, alphanumeric
+  `replaceAll`, `encodeForSQL`; for path traversal: `getCanonicalPath`,
+  `normalize`, `replace("..", ...)`. Sinks: JDBC/Spring `execute*`,
+  `prepareStatement`, `query*`, `update`; `new File(...)`, file streams,
+  `RandomAccessFile`, `Paths.get`.
+- `pmd_cwe89_cwe22.xml`: same sink set, but purely syntactic: flags a sink
+  whose argument list has no string literal. No dataflow, so it
+  over-approximates (on OWASP: recall 0.97, FPR 0.97).
+
+### 4.4 LLM: `llm/`
+
+- `base.py`: `Verdict` dataclass, `LLMBackend` protocol,
+  `_first_json_object(text)` (first balanced `{...}` that parses), and
+  `parse_verdict(text)`: reads key `verdict`, `decision`, `label` or
+  `answer`; maps words (`vulnerable/yes/true/confirm/1` vs
+  `safe/no/false/reject/0/none`); a JSON object with no usable key -> safe;
+  no JSON at all -> keyword search over the whole text (any vulnerable word
+  -> vulnerable, else safe).
+- `prompts.py`:
+  - `zero_shot(code)`: system line ("You are a Java security auditor...
+    CWE-89 or CWE-22") + JSON spec `{verdict, cwe, line, reason}` + code.
+  - `cot(code)`: same plus "Reason step by step"; run without JSON mode.
+  - `few_shot(code, examples)`: shots prepended.
+  - `static_augmented(code, tool, cwe, line)`: the original hybrid prompt:
+    "<tool> flagged a possible CWE-x at line N. Confirm or reject",
+    answer `{decision: confirm|reject, reason}`.
+  - `trace_confirm(code, cwe, trace, hints=True)`: the current hybrid
+    prompt. Code is line-numbered; the Semgrep path is shown as Source /
+    Through / Sink lines; the model is told taint analyzers report many
+    false alarms and to follow the value that actually reaches the sink.
+    With `hints=True` it adds: "it may be replaced by a constant, chosen by
+    a condition whose outcome is fixed, sanitized, or taken from a different
+    element than the tainted one". Answer `{analysis, verdict}` with
+    `analysis` first so the model reasons before committing.
+  - `BUILDERS` maps strategy name -> builder.
+- `ollama.py`: `OllamaBackend(model, host, temperature=0.0, num_predict=512,
+  timeout=300)`. `generate(prompt, force_json=True)` POSTs to
+  `/api/generate` with `stream: false`. For models starting with
+  `REASONING_PREFIXES = ("qwen3", "gpt-oss", "deepseek-r1")` it sets
+  `think: true`, `num_predict=4096`, `num_ctx=8192` and a 900 s timeout
+  (thinking is returned separately and not stored). `force_json` sets
+  `format: "json"`. On HTTP 5xx it retries once without `format` (Ollama's
+  JSON grammar sometimes fails with a bare 500). Returns `GenResult(text,
+  tokens_in=prompt_eval_count, tokens_out=eval_count,
+  elapsed_ms=total_duration)`. Also `is_available()`, `installed_models()`.
+- `openai.py`: `OpenAIBackend` (Chat Completions over urllib) and
+  `backend_for(model, host, temperature)`. No OpenAI model has been run,
+  but this module **is** on the active path: `backend_for` is the
+  dispatcher used by `llm/run.py`, `hybrid/run.py` and `scripts/pilot.py`;
+  for any non-`gpt-*`/`o*` name it just returns an `OllamaBackend`.
+- `run.py`: `run(cfg, corpus, model, strategy, runs, temperature, limit,
+  host)`. For each snippet: build prompt (`_build_prompt`), call the model
+  `n_runs` times (`n_runs` is forced to 1 when temperature is 0), parse,
+  vote (`_vote`: vulnerable if at least half the runs say vulnerable, so a
+  tie counts as vulnerable), and write one per-snippet `Finding` (tokens and
+  time summed across runs) plus one row per call into `llm_runs/`.
+  Few-shot uses the first vulnerable and first safe snippet of the corpus
+  as shots and removes them from the evaluation set (`_held_out`).
+- `mock.py`: `MockBackend`, a keyword heuristic used only by tests.
+
+### 4.5 Hybrid: `hybrid/run.py`
+
+- `sast_candidates(findings)`: union of all input SAST findings with
+  `verdict == 1`; the first finding seen per snippet is the representative
+  (gives `tool`, `cwe`, `line`, `rule_id`).
+- `run(cfg, corpus, sast_findings, model, scope, runs, temperature, limit,
+  host, traces, hints)`. Per snippet:
+  - **candidate**: if a trace exists for it, prompt = `trace_confirm(code,
+    cwe, trace, hints)` and `prompt_strategy="trace-confirm"`; otherwise
+    `static_augmented(...)`. Verdict from `_confirm_vote` (strict majority,
+    a tie rejects). Confirmed rows keep the alert's `cwe` and `line`.
+  - **not a candidate, scope `reject`**: verdict 0, no LLM call
+    (`explanation="no SAST candidate"`). Recall can never exceed the SAST
+    input's recall.
+  - **not a candidate, scope `augment`**: a `zero_shot` call, so the
+    hybrid can also find what SAST missed (at the cost of 772 calls instead
+    of about 632).
+- `_tool_name()` builds the tool string; with traces it appends `__trace`
+  or `__trace-hints`.
+- The CWE sent to the prompt is the alert's CWE, falling back to the
+  snippet's CWE.
+
+### 4.6 Metrics: `metrics/`
+
+- `join.py`: `join_to_truth` (drops findings for unknown snippets),
+  `confusion_by_tool` (a snippet with no row for a tool counts as a
+  negative verdict), `aligned_predictions` (paired `y_true` and `y_pred`
+  arrays in corpus order, used by bootstrap and McNemar).
+- `compute.py`: `metrics_from_confusion` (precision, recall, FPR, F1),
+  `his`, `bootstrap_f1_ci`, `mcnemar`. Details in section 6.
+
+### 4.7 Figures: `figures/plots.py` and `scripts/thesis_figures.py`
+
+- `figure_data(findings, corpus)` returns one `FigureRow` per tool
+  (metrics, mean `tokens_out`, mean `elapsed_ms`, set of TP snippet ids).
+- `pr_scatter`, `cost_vs_f1` (SAST is pinned at x = 0 tokens), `venn_tp`
+  (needs `matplotlib-venn`), `make_all`. Labels are made by `_short()`.
+- `scripts/thesis_figures.py`: `corpus_composition()` (stacked bars from
+  `corpus/owasp.jsonl`) and `leakage()` (the Juliet leakage control
+  experiment). The leakage numbers are **hard-coded** in the script
+  (DeepSeek zero-shot on 74 Juliet cases: Original / Sin pistas / Solo el
+  método); no code in the repo regenerates them. `main_results()` draws
+  precision, recall, F1 and FPR for Semgrep, Qwen3-8B zero-shot and the
+  trace hybrid, and `trap_patterns()` splits Semgrep's false alerts by
+  benchmark trap (arithmetic condition, `switch`, collection, matched by
+  regex on the code) into those the confirmer discarded or kept.
+
+### 4.8 Pilot: `scripts/pilot.py`
+
+Purpose: a cheap check that a confirmer's answer depends on the code before
+running it on all 632 alerts. It loads `corpus/owasp.jsonl`, the Semgrep
+alerts (`verdict == 1` in `semgrep_perSnippet.jsonl`) and the parsed
+traces, then samples 30 true alerts (label 1) and 30 false alerts (label 0)
+with `random.Random(7)`. For each variant it asks the model once per alert:
+
+| variant | prompt |
+|---|---|
+| `trace` | `trace_confirm(..., hints=True)` (the default) |
+| `trace-nohints` | `trace_confirm(..., hints=False)` |
+| `confirm` | `static_augmented(...)` (the prompt of the first DeepSeek hybrid run) |
+| `zero-shot` | `zero_shot(code)` |
+
+It reports TPR (share of true alerts kept), FPR (share of false alerts
+kept) and Youden J = TPR - FPR. J near 0 means the model says the same
+thing regardless of the code. It is resumable row by row (appends and
+flushes after each answer). Note that pilot variant `trace` corresponds to
+`hybrid run --traces --hints`, and `trace-nohints` to `hybrid run --traces`
+without `--hints`.
+
+## 5. Data formats
+
+All files are JSONL (one JSON object per line), `None` fields omitted.
+
+**Corpus** (`corpus/owasp.jsonl`, 772 rows):
+
+```json
+{"snippet_id": "owasp_CWE22__BenchmarkTest00001", "cwe": "22", "label": 1,
+ "code": "package org.owasp.benchmark.testcode;\nimport java.io.IOException;\n...@WebServlet(value = \"/app/TestCase\")\npublic class TestCase extends HttpServlet {...",
+ "file": "BenchmarkTest00001.java", "line": 1}
+```
+
+Composition: CWE-89 504 (272 vulnerable, 232 safe), CWE-22 268 (133
+vulnerable, 135 safe); 405 vulnerable and 367 safe in total.
+`corpus/juliet.jsonl` has the same fields; `snippet_id` is
+`juliet_CWE<cwe>__<file stem>__<method>` and `line` is the first line of
+the slice.
+
+**Per-snippet findings** (`findings/owasp/*_perSnippet.jsonl`, one row per
+corpus snippet, this is what metrics reads):
+
+```json
+{"snippet_id": "owasp_CWE22__BenchmarkTest00001", "tool": "semgrep", "verdict": 1, "cwe": "22", "line": 45,
+ "rule_id": "rules.path-traversal-taint-file", "explanation": "Path Traversal (CWE-22): ...", "elapsed_ms": 6194.79}
+{"snippet_id": "owasp_CWE22__BenchmarkTest00001", "tool": "pmd-vanilla", "verdict": 0, "elapsed_ms": 2455.19}
+{"snippet_id": "owasp_CWE22__BenchmarkTest00001", "tool": "qwen3_8b__zero-shot", "verdict": 1, "cwe": "22",
+ "explanation": "The parameter 'param' is directly concatenated ...", "elapsed_ms": 29279.9,
+ "tokens_in": 678, "tokens_out": 473, "prompt_strategy": "zero-shot"}
+{"snippet_id": "owasp_CWE22__BenchmarkTest00001", "tool": "hybrid__semgrep__qwen3_8b__reject__trace", "verdict": 1,
+ "cwe": "22", "line": 45, "rule_id": "rules.path-traversal-taint-file", "explanation": "confirmer over semgrep alert",
+ "elapsed_ms": 71907.8, "tokens_in": 1160, "tokens_out": 787, "prompt_strategy": "trace-confirm"}
+```
+
+Notes: SAST `elapsed_ms` is the whole batch time repeated on each row; LLM
+`elapsed_ms` is per snippet (from Ollama's `total_duration`). Hybrid rows
+for non-candidates under `reject` have no tokens and
+`explanation: "no SAST candidate"`. The LLM `explanation` is the model's
+`reason`; the hybrid rows do not store the model's text.
+
+**Per-call LLM runs** (`findings/owasp/llm_runs/<tool>_runs.jsonl`): same
+fields as the per-snippet row for that call plus `line` and `run_idx`
+(1..N).
+
+**Pilot rows** (`findings/owasp/pilot/<model_tag>__<variant>.jsonl`, 60
+rows each):
+
+```json
+{"snippet_id": "owasp_CWE89__BenchmarkTest00516", "label": 1, "verdict": 1, "json_ok": true,
+ "tokens_out": 525, "raw": "{\"analysis\": \"The user-controlled input ... \", \"verdict\": \"vulnerable\"}"}
+```
+
+`json_ok` is whether a JSON object could be extracted; `raw` is the full
+model answer (thinking excluded).
+
+**Semgrep traces** (`findings/owasp/scan/semgrep_traces.txt`): Semgrep's
+human-readable output. Each file block starts with `/src/<snippet_id>.java`,
+each finding with `❯❯❱ <rule>` or `⋮┆----`, followed by sections "Taint
+comes from:", "Taint flows through these intermediate variables:", "This is
+how taint reaches the sink:", each with lines like `   45┆ <code>`. The
+current file reports 825 code findings over 632 flagged snippets.
+
+**Metrics table** (`metrics/owasp/per_tool.csv`):
+
+```
+tool,precision,recall,fpr,f1,f1_ci_low,f1_ci_high,tp,fp,tn,fn
+semgrep,0.5949,0.9284,0.6975,0.7252,0.6931,0.7533,376,256,111,29
+```
+
+## 6. Metrics and statistics
+
+Positive class = vulnerable. Per tool, over all corpus snippets (missing
+row = predicted safe):
+
+- precision = TP / (TP + FP)
+- recall (TPR) = TP / (TP + FN)
+- FPR = FP / (FP + TN)
+- F1 = 2PR / (P + R)
+- All divisions return 0 when the denominator is 0 (`_safe_div`).
+
+**Bootstrap CI for F1** (`bootstrap_f1_ci`): resample snippet indices with
+replacement 1000 times (`metrics.bootstrap_resamples`), recompute F1 on
+each, take the 2.5 and 97.5 percentiles (`alpha = 0.05`). Seed 42, so the
+CI is reproducible.
+
+**HIS** (Hybrid Improvement Score, `his`):
+
+```
+HIS = (F1_hybrid - max(F1_SAST, F1_LLM)) / max(F1_SAST, F1_LLM)
+```
+
+HIS > 0 means the hybrid beats the better of its two components. It is
+printed only with `metrics --compare SAST LLM HYBRID`, which takes tool
+names as they appear in the `tool` column.
+
+**McNemar** (`mcnemar`): for two detectors A and B on the same snippets,
+b = cases A gets right and B gets wrong, c = the reverse. If b + c < 25 it
+uses the exact two-sided binomial test; otherwise chi-square with 1 degree
+of freedom and continuity correction, `(|b - c| - 1)^2 / (b + c)`.
+`--compare` runs it for hybrid vs SAST and hybrid vs LLM and labels the
+result significant at `alpha`.
+
+**Youden J** (pilot only): TPR - FPR on the 60-alert sample.
+
+## 7. Configuration
+
+`config.yaml` and `config.owasp.yaml` are identical except `paths.findings`,
+`paths.metrics`, `paths.figures` (OWASP uses `owasp/` subfolders) and the
+`corpus.owasp.dir` key. What the code actually reads:
+
+| key | used by | effect |
+|---|---|---|
+| `cwes` | SAST aggregation, Juliet prefix map | target CWEs `"89"`, `"22"` |
+| `paths.*` | everything | output dirs, relative to the config file |
+| `corpus.seed`, `context_lines`, `juliet.*` | Juliet only | sampling, slice size, URL, CWE map |
+| `corpus.owasp.dir` | OWASP | `data/owasp-benchmark` |
+| `sast.pmd.image`, `sast.semgrep.image` | SAST | `pmdcode/pmd:7.25.0`, `semgrep/semgrep:1.103.0` |
+| `llm.temperature` | LLM, hybrid | 0.0 (deterministic) |
+| `llm.runs_per_snippet` | LLM, hybrid | 3, but ignored while temperature is 0 |
+| `metrics.bootstrap_resamples`, `metrics.alpha` | metrics | 1000, 0.05 |
+
+Not read anywhere: `llm.strategies`, `corpus.defects4j.n_bugs`.
+Hard-coded in the code rather than the config: Ollama `num_predict` (512,
+or 4096 for reasoning models), `num_ctx` 8192, timeouts (300 s / 900 s),
+rule-to-CWE maps (`pmd.VARIANTS`, `semgrep.RULE_CWE`), pilot seed 7 and
+sample size 30.
+
+Install: `python -m venv .venv && .venv/bin/pip install -e ".[dev,figures]"`.
+External requirements: Docker (SAST), Ollama with the models pulled (LLM),
+a LaTeX install for `thesis_figures.py`.
+
+## 8. Tests
+
+```bash
+.venv/bin/python -m pytest -q      # 46 passed in about 1 s
+```
+
+All tests are offline (mock backend, fixtures, no Docker, no Ollama).
+
+| file | covers |
+|---|---|
+| `test_schemas.py` | round-trips, unknown columns ignored, invalid label/verdict rejected |
+| `test_corpus.py` | Juliet method extraction, context slice, labels, deterministic sampling, CWE prefix map, `parse_verdict` on fenced/prose output |
+| `test_owasp.py` | `strip_comments` keeps `//` inside strings, `neutralise` removes hints, `read_expected` filtering, whole OWASP files materialized verbatim |
+| `test_sast.py` | `wrap_snippet`, SARIF parsing and filtering, one finding per snippet, vanilla map empty, `rules.`-prefixed Semgrep ids, `parse_text_traces` |
+| `test_llm.py` | verdict parsing, majority vote, tool-name sanitizing, few-shot hold-out, offline end-to-end run |
+| `test_hybrid.py` | candidate union, tie rejects, tool name encodes config, reject prunes FP, augment recovers a SAST negative, `--traces` switches to the trace prompt |
+| `test_metrics.py` | hand-computed confusion/metrics, missing = negative, HIS sign, bootstrap brackets the point estimate, McNemar, aggregation rule |
+| `test_figures.py` | `figure_data` metrics, TP sets, ordering |
+| `test_openai.py` | `backend_for` routing, JSON mode and usage parsing (mocked HTTP) |
+
+## 9. Current results and what is pending
+
+OWASP Benchmark, 772 cases (`metrics/owasp/per_tool.csv`):
+
+| tool | P | R | FPR | F1 | F1 95% CI | TP | FP | TN | FN |
+|---|---|---|---|---|---|---|---|---|---|
+| semgrep | 0.595 | 0.928 | 0.698 | 0.725 | 0.693-0.753 | 376 | 256 | 111 | 29 |
+| pmd-custom | 0.525 | 0.973 | 0.973 | 0.682 | 0.650-0.712 | 394 | 357 | 10 | 11 |
+| pmd-vanilla | 0 | 0 | 0 | 0 | | 0 | 0 | 367 | 405 |
+| deepseek-coder 6.7b zero-shot | 0.535 | 0.916 | 0.880 | 0.675 | 0.643-0.708 | 371 | 323 | 44 | 34 |
+| qwen3 8b zero-shot | 0.666 | 0.605 | 0.335 | 0.634 | 0.590-0.672 | 245 | 123 | 244 | 160 |
+| hybrid semgrep -> qwen3, reject, trace | **0.831** | **0.886** | **0.199** | **0.858** | 0.831-0.881 | 359 | 73 | 294 | 46 |
+| hybrid semgrep -> deepseek, reject | 0.471 | 0.020 | 0.025 | 0.038 | 0.014-0.066 | 8 | 9 | 358 | 397 |
+| hybrid semgrep -> deepseek, augment | 0.248 | 0.089 | 0.297 | 0.131 | 0.094-0.171 | 36 | 109 | 258 | 369 |
+
+HIS for the Qwen3 hybrid against Semgrep (0.725) and Qwen3 zero-shot
+(0.634): (0.858 - 0.725) / 0.725 = **+0.183**. The confirmer kept 432 of
+Semgrep's 632 alerts: it removed 183 of 256 false alarms and lost 17 of 376
+true ones.
+
+The DeepSeek hybrids used the old `static_augmented` prompt (no traces).
+DeepSeek confirmed only 17 of 632 alerts; 61 of its 632 answers hit the
+512-token output cap. The pilot predicted this (`confirm` TPR 0.13, 9 of
+60 answers unparsed).
+
+Pilot (60 Semgrep alerts, 30/30, seed 7), recomputed from
+`findings/owasp/pilot/`:
+
+| model | variant | TPR | FPR | J |
+|---|---|---|---|---|
+| deepseek-coder 6.7b | confirm | 0.13 | 0.03 | +0.10 |
+| deepseek-coder 6.7b | trace | 1.00 | 0.93 | +0.07 |
+| deepseek-coder 6.7b | zero-shot | 0.93 | 0.77 | +0.17 |
+| qwen2.5-coder 7b | trace | 0.53 | 0.27 | +0.27 |
+| qwen3 8b | trace (with hints) | 1.00 | 0.00 | +1.00 |
+| qwen3 8b | trace-nohints | 1.00 | 0.23 | +0.77 |
+| qwen3 8b | zero-shot | 0.60 | 0.27 | +0.33 |
+
+The full Qwen3 hybrid run (`reject__trace`) used no hints, which matches
+the pilot's `trace-nohints` configuration (pilot FPR 0.23, full run 0.199).
+
+Juliet results (older, method-level, `metrics/per_tool.csv`): DeepSeek
+zero-shot F1 0.865, CoT 0.760, few-shot 0.664, CodeLlama 13B 0.574,
+PMD-custom 0.594; hybrids `pmd-custom+semgrep` -> DeepSeek reject 0.596,
+augment 0.762. Juliet comments were not stripped, which is what the
+leakage control experiment is about.
+
+Pending, or not implemented:
+
+- Running: `hybrid__semgrep__qwen3_8b__reject__trace-hints` (last started
+  step in `run_owasp.log`), then `hybrid__semgrep__qwen3_8b__augment__trace`.
+  After they finish, rerun `metrics` (and `--compare`) and the figures.
+- `--compare` (HIS printout + McNemar) has to be run on the final set.
+- Not implemented: CodeQL, SpotBugs/FindSecBugs, SonarQube (only mentioned
+  in docstrings; `sast run --tool` accepts only `pmd` and `semgrep`),
+  CodeBERT (only the `ml` extra in `pyproject.toml`, no code), Defects4J
+  (stub).
+- Implemented but not run on OWASP: `cot` and `few-shot` strategies (they
+  ran on Juliet with DeepSeek only), the OpenAI backend.
+- The Juliet leakage numbers in `thesis_figures.py` are typed in by hand;
+  there is no script that reproduces the "Sin pistas" and "Solo el método"
+  conditions.
+
+## 10. Gotchas
+
+- **Every command defaults to `corpus/juliet.jsonl`.** `--config
+  config.owasp.yaml` changes the output folders, not the corpus. Always add
+  `--corpus corpus/owasp.jsonl` for OWASP, or you will score OWASP findings
+  against Juliet truth (every OWASP finding gets dropped as unknown).
+- **`metrics` overwrites `per_tool.csv`** with only the tools in the files
+  you pass. To regenerate the full table pass
+  `findings/owasp/*_perSnippet.jsonl`. A file passed twice is harmless
+  (rows merge by `(tool, snippet_id)`).
+- **Traces only exist in Semgrep's text output.** JSON and SARIF from
+  Semgrep OSS drop them, so the Semgrep step runs a second text pass and
+  `parse_text_traces` scrapes it. The parser depends on Semgrep 1.103.0's
+  text layout (`┆`, `❯`, the section titles); a different Semgrep version
+  may need regex changes. The exit code of that second pass is not
+  checked, so if it fails, `semgrep_traces.txt` can be empty and the hybrid
+  silently falls back to `static_augmented` for snippets without a trace.
+- **`--traces` alone means no hints.** `--hints` must be added explicitly.
+  In `pilot.py` it is the other way round: `trace` has hints, and
+  `trace-nohints` does not.
+- **Output is written only at the end of a step.** `llm run` and
+  `hybrid run` hold all rows in memory and call `write_jsonl` once. Killing
+  a 5 to 8 hour Qwen3 step loses everything; `run_owasp.sh` resumes per
+  step, not per snippet. Only `pilot.py` saves after every answer.
+- **`run_owasp.sh` skip check for PMD** looks only at
+  `pmd-custom_perSnippet.jsonl` even though the step writes both variants.
+- **`pgrep -f` matches itself.** When checking whether a run is alive with
+  something like `pgrep -f "vulnpipe hybrid"`, the shell running pgrep (or
+  a `bash -c` wrapper) contains the same string and matches. Use
+  `pgrep -f "[v]ulnpipe hybrid"` or `ps -ef | grep -v grep`, or watch the
+  progress lines (`325/772`) in the log.
+- **The scan dir is shared and cleared.** `materialize` deletes
+  `scan/*.java` before writing, and PMD and Semgrep use the same
+  `findings/owasp/scan/`. Fine when run sequentially, wrong if two SAST
+  runs overlap.
+- **`pmd-vanilla` is zero by construction**: its rule-to-CWE map is empty
+  and `parse_sarif(..., only_mapped=True)` drops every unmapped rule, so no
+  PMD output can ever count. It documents the coverage gap of the stock
+  ruleset.
+- **Temperature 0 disables voting.** `runs_per_snippet: 3` and `--runs` are
+  ignored unless `--temperature` > 0. The LLM vote counts a tie as
+  vulnerable; the hybrid vote counts a tie as reject.
+- **Token cap for non-reasoning models** is 512 (`num_predict`). Long
+  answers are truncated, and a truncated JSON falls back to keyword
+  parsing (or safe). Reasoning models get 4096.
+- **Hint leakage**: OWASP code is neutralised, but `snippet_id`, `file` and
+  the materialized file names still contain `CWE22`/`BenchmarkTestNNNNN`.
+  Only SAST sees those file names (and it ignores them); prompts contain
+  only `code` and line numbers. Juliet snippets keep their comments.
+- **Pilot sample overlaps the test set.** The 60 pilot alerts are drawn
+  from the same 632 Semgrep alerts the hybrid is scored on, and the hint
+  wording was chosen with pilot results in view. Worth stating as a
+  limitation when reporting the hints variant.
+- **Figure labels for trace hybrids**: `_short()` in `plots.py` assumes the
+  tool name ends in `__<scope>`, so `hybrid__semgrep__qwen3_8b__reject__trace`
+  is labelled `híb:reject:trace` instead of showing the model.
+- **`thesis_figures.py` needs LaTeX** (`text.usetex=True`) and writes
+  outside the package, into `../Template/Graficos/`.
+- **CLI `--help` docstring is stale**: the top-level description lists only
+  `corpus build` and `metrics`, but all six subcommands exist.
+- **`docs/` and `README.md` are outdated** (README still says hybrid and
+  figures are "not started" and shows Juliet-only results).
