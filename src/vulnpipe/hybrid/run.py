@@ -30,6 +30,7 @@ each hybrid variant as its own detector, e.g.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -99,6 +100,19 @@ def _query(
     return _confirm_vote(verdicts), verdicts, tin, tout, elapsed
 
 
+def _load_partial(path: Path) -> dict[str, Finding]:
+    """Findings saved by an interrupted run of the same configuration."""
+    done: dict[str, Finding] = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                f = Finding.from_dict(json.loads(line))
+            except ValueError:
+                continue  # last line cut short by the crash
+            done[f.snippet_id] = f
+    return done
+
+
 def run(
     cfg: Config,
     corpus: Sequence[Snippet],
@@ -120,6 +134,10 @@ def run(
     dataflow traces, ``sast.semgrep.parse_text_traces``) switches the
     confirmer to the ``trace_confirm`` prompt for every candidate that has one;
     ``hints`` adds that prompt's list of typical false-alarm causes.
+
+    Every LLM answer is appended to ``<output>.partial`` as soon as it
+    arrives, and a rerun of the same configuration picks up from there, so a
+    crash hours into a run loses one call instead of the whole run.
     """
     from vulnpipe.io import write_jsonl
 
@@ -147,11 +165,20 @@ def run(
         f"scope={scope}, temp={temp}"
     )
 
+    out = cfg.ensure_path("findings") / f"{tool}_perSnippet.jsonl"
+    partial = out.with_suffix(".partial")
+    done = _load_partial(partial)
+    if done:
+        print(f"  resuming: {len(done)} answer(s) already saved in {partial.name}")
+    ckpt = open(partial, "a", encoding="utf-8")
+
     per_snippet: list[Finding] = []
     n_calls = 0
     for i, s in enumerate(eval_set, 1):
         cand = candidates.get(s.snippet_id)
-        if cand is not None:
+        if s.snippet_id in done:
+            per_snippet.append(done[s.snippet_id])
+        elif cand is not None:
             # Confirmer path: confirm or reject this specific SAST alert.
             cwe = cand.cwe or (s.cwe if s.cwe in ("89", "22") else "89")
             trace = (traces or {}).get(s.snippet_id)
@@ -194,12 +221,17 @@ def run(
                     prompt_strategy="static-augmented", explanation="no SAST candidate",
                 )
             )
+        last = per_snippet[-1]
+        if last.tokens_out is not None and s.snippet_id not in done:  # an LLM answer
+            row = {k: v for k, v in last.to_dict().items() if v is not None}
+            ckpt.write(json.dumps(row) + "\n")
+            ckpt.flush()
         if i % 25 == 0:
-            print(f"  {i}/{len(eval_set)} ({n_calls} LLM call(s))")
+            print(f"  {i}/{len(eval_set)} ({n_calls} LLM call(s))", flush=True)
 
-    findings_dir = cfg.ensure_path("findings")
-    out = findings_dir / f"{tool}_perSnippet.jsonl"
+    ckpt.close()
     write_jsonl(out, per_snippet)
+    partial.unlink()
 
     n_flag = sum(1 for f in per_snippet if f.verdict == VULNERABLE)
     n_pruned = n_cand - n_flag if scope == "reject" else None

@@ -17,6 +17,8 @@ data/
 #   *.sarif         = raw SAST reports (parsed into the tracked jsonl below)
 findings/scan/
 findings/*/scan/
+#   findings/*/build/ = compiled copy of the corpus (classes, CodeQL database, raw reports)
+findings/*/build/
 *.sarif
 
 # Figures are regenerated from the tracked findings.
@@ -33,3 +35,6 @@ docs/
 
 # Run logs
 *.log
+
+# Checkpoints of runs in progress
+*.partial

@@ -150,3 +150,61 @@ def test_parse_text_traces_reads_source_steps_and_sink():
 """
     t = parse_text_traces(text)["owasp_CWE89__BenchmarkTest00008"]
     assert t == {"source": [22], "steps": [22, 25], "sink": [29, 30]}
+
+
+def test_spotbugs_report_maps_bug_patterns_to_cases(tmp_path):
+    from vulnpipe.sast.spotbugs import parse_report
+
+    pkg = "org.owasp.benchmark"
+    report = tmp_path / "spotbugsXml.xml"
+    report.write_text(f"""<BugCollection>
+      <BugInstance type="SQL_INJECTION_JDBC"><ShortMessage>sqli</ShortMessage>
+        <Class classname="{pkg}.testcode.BenchmarkTest00008$Test"/><SourceLine start="41"/></BugInstance>
+      <BugInstance type="PATH_TRAVERSAL_IN">
+        <Class classname="{pkg}.testcode.BenchmarkTest00001"/><SourceLine start="45"/></BugInstance>
+      <BugInstance type="PATH_TRAVERSAL_IN"><Class classname="{pkg}.helpers.Utils"/></BugInstance>
+      <BugInstance type="SERVLET_PARAMETER"><Class classname="{pkg}.testcode.BenchmarkTest00001"/></BugInstance>
+    </BugCollection>""")
+    ids = {"BenchmarkTest00001": "a", "BenchmarkTest00008": "b"}
+    got = [(i.snippet_id, i.cwe, i.line) for i in parse_report(report, ids)]
+    assert got == [("b", "89", 41), ("a", "22", 45)]  # helper class and unrelated pattern dropped
+
+
+def test_codeql_sarif_keeps_only_tagged_rules_and_in_case_path_lines(tmp_path):
+    import json
+
+    from vulnpipe.sast.codeql import parse_sarif
+
+    def loc(name, line):
+        return {"physicalLocation": {"artifactLocation": {"uri": f"src/x/{name}.java"},
+                                     "region": {"startLine": line}}}
+
+    def result(rule, case, path):
+        return {"ruleId": rule, "message": {"text": "m"}, "locations": [loc(case, path[-1][1])],
+                "codeFlows": [{"threadFlows": [{"locations": [{"location": loc(*p)} for p in path]}]}]}
+
+    case = "BenchmarkTest00002"
+    sarif = tmp_path / "codeql.sarif"
+    sarif.write_text(json.dumps({"runs": [{
+        "tool": {"driver": {"rules": [
+            {"id": "java/sql-injection", "properties": {"tags": ["security", "external/cwe/cwe-089"]}},
+            {"id": "java/xss", "properties": {"tags": ["external/cwe/cwe-079"]}}]}},
+        "results": [
+            result("java/sql-injection", case, [("SeparateClassRequest", 31), (case, 22), (case, 30), (case, 44)]),
+            result("java/xss", case, [(case, 22), (case, 50)]),
+        ]}]}))
+    issues, traces = parse_sarif(sarif, {case: "s"})
+    assert [(i.snippet_id, i.cwe, i.line) for i in issues] == [("s", "89", 44)]
+    assert traces == {"s": {"source": [22], "steps": [30], "sink": [44]}}  # helper-class step skipped
+
+
+def test_sonarqube_rows_keep_only_cwe_rules_inside_cases():
+    from vulnpipe.sast.sonarqube import to_issues
+
+    rows = [
+        {"ruleKey": "java:S2077", "component": "p:src/x/BenchmarkTest00002.java", "line": 44},  # hotspot
+        {"rule": "java:S2077", "component": "p:src/x/Utils.java", "line": 9},                    # helper
+        {"ruleKey": "java:S1989", "component": "p:src/x/BenchmarkTest00002.java", "line": 3},   # other rule
+    ]
+    got = to_issues(rows, {"java:S2077": "89"}, {"BenchmarkTest00002": "s"})
+    assert [(i.snippet_id, i.cwe, i.line) for i in got] == [("s", "89", 44)]

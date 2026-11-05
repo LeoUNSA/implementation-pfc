@@ -21,6 +21,10 @@ step() {  # step <output file> <command...>
 step corpus/owasp.jsonl $V corpus build --only owasp
 step "$F/pmd-custom_perSnippet.jsonl" $V sast run --tool pmd --variant both $C
 step "$SEMGREP" $V sast run --tool semgrep $C
+# Tools that need the corpus compiled (Docker; CodeQL bundle in data/tools/codeql).
+for tool in findsecbugs codeql sonarqube; do
+    step "$F/${tool}_perSnippet.jsonl" $V sast run --tool "$tool" $C
+done
 
 step "$F/${DSF}__zero-shot_perSnippet.jsonl" $V llm run --model "$DS" --strategy zero-shot $C
 step "$F/hybrid__semgrep__${DSF}__reject_perSnippet.jsonl" \
@@ -36,9 +40,14 @@ TRACES="$F/scan/semgrep_traces.txt"   # written by the Semgrep step
 step "$F/hybrid__semgrep__${QF}__reject__trace_perSnippet.jsonl" \
     $V hybrid run --sast "$SEMGREP" --traces "$TRACES" --model "$Q" --scope reject $C
 step "$F/${QF}__zero-shot_perSnippet.jsonl" $V llm run --model "$Q" --strategy zero-shot $C
+# CodeQL is the strongest analyzer (F1 0.841), so its hybrid comes first.
+CODEQL="$F/codeql_perSnippet.jsonl"
+step "$F/hybrid__codeql__${QF}__reject__trace_perSnippet.jsonl" \
+    $V hybrid run --sast "$CODEQL" --traces "$F/scan/codeql_traces.json" --model "$Q" --scope reject $C
 step "$F/hybrid__semgrep__${QF}__reject__trace-hints_perSnippet.jsonl" \
     $V hybrid run --sast "$SEMGREP" --traces "$TRACES" --hints --model "$Q" --scope reject $C
-step "$F/hybrid__semgrep__${QF}__augment__trace_perSnippet.jsonl" \
-    $V hybrid run --sast "$SEMGREP" --traces "$TRACES" --model "$Q" --scope augment $C
+# ponytail: no augment step. At temperature 0 it equals the reject answers plus
+# the zero-shot answers on the cases the analyzer did not flag, so it can be
+# composed from the files above instead of spending ~12 h of GPU.
 
 $V metrics $C --findings "$F"/*_perSnippet.jsonl

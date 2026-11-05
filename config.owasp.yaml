@@ -46,6 +46,16 @@ sast:
     image: "semgrep/semgrep:1.103.0"   # pinned; "latest" drifts past it
     # Taint-mode ruleset rulesets/semgrep_cwe89_cwe22.yml (sources/sinks/
     # sanitizers). rule->CWE map lives in vulnpipe.sast.semgrep.
+  # The three tools below analyse a compiled copy of the corpus
+  # (vulnpipe.sast.project), built in this container.
+  build:
+    image: "maven:3.9.9-eclipse-temurin-17"
+  # findsecbugs: SpotBugs 4.10.4 + FindSecBugs 1.14.0, the versions and the
+  #   profile (effort Max, threshold Low) of the benchmark's own pom.xml.
+  # codeql: CLI 2.27.4 with its default code-scanning suite; the bundle is
+  #   unpacked in data/tools/codeql (see vulnpipe.sast.codeql).
+  sonarqube:
+    image: "sonarqube:10.7.0-community"   # default "Sonar way" profile; hotspots count as alerts
 
 llm:
   # Stubbed this increment. Real local backends (Ollama) wired later.

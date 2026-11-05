@@ -14,7 +14,8 @@ Fetch the data once (sparse clone, ~2740 files):
     git clone --depth 1 --filter=blob:none --sparse \
         https://github.com/OWASP-Benchmark/BenchmarkJava.git data/owasp-benchmark
     git -C data/owasp-benchmark sparse-checkout set \
-        src/main/java/org/owasp/benchmark/testcode src/main/java/org/owasp/benchmark/helpers
+        src/main/java/org/owasp/benchmark/testcode src/main/java/org/owasp/benchmark/helpers \
+        src/main/java/org/owasp/benchmark/service
 """
 
 from __future__ import annotations

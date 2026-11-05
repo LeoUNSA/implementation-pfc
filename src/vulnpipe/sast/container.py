@@ -38,11 +38,13 @@ def run_container(
     args: Sequence[str],
     mounts: dict[Path, str],
     timeout: int = 1800,
+    docker_args: Sequence[str] = (),
 ) -> tuple[int, str, str, float]:
     """Run ``docker run --rm`` with bind mounts. Returns (rc, stdout, stderr,
-    elapsed_ms). ``mounts`` maps host path → container path (mounted ro)."""
+    elapsed_ms). ``mounts`` maps host path → container path (mounted ro).
+    ``docker_args`` are extra ``docker run`` options (user, env, network)."""
     ensure_docker()
-    cmd = ["docker", "run", "--rm"]
+    cmd = ["docker", "run", "--rm", *docker_args]
     for host, container in mounts.items():
         cmd += ["-v", f"{Path(host).resolve()}:{container}"]
     cmd += [image, *args]

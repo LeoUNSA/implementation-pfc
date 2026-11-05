@@ -109,3 +109,27 @@ def test_traces_switch_confirmer_to_trace_prompt(tmp_path, monkeypatch):
     assert row["tool"] == "hybrid__semgrep__fake_1b__reject__trace"
     assert "replaced by a constant" not in seen[0]  # hints are opt-in
     assert row["prompt_strategy"] == "trace-confirm"
+
+
+def test_interrupted_run_resumes_from_partial_file(tmp_path, monkeypatch):
+    calls = []
+
+    class _Recorder(_FakeBackend):
+        def generate(self, prompt, force_json=True):
+            calls.append(prompt)
+            return super().generate(prompt, force_json)
+
+    monkeypatch.setattr(hybrid_run, "backend_for", lambda model, host, temperature: _Recorder(model))
+    cfg = _cfg(tmp_path)
+    corpus = [Snippet(i, "89", VULNERABLE, f"{i}.executeQuery(q);", f"{i}.java") for i in ("a", "b")]
+    sast = [Finding(i, "semgrep", VULNERABLE, cwe="89", line=1) for i in ("a", "b")]
+    tool = "hybrid__semgrep__fake_1b__reject"
+    partial = cfg.ensure_path("findings") / f"{tool}_perSnippet.partial"
+    saved = {"snippet_id": "a", "tool": tool, "verdict": SAFE, "tokens_in": 5, "tokens_out": 7}
+    partial.write_text(json.dumps(saved) + '\n{"snippet_id": "b", "to')  # second line cut short
+
+    out = hybrid_run.run(cfg, corpus, sast, model="fake:1b", scope="reject")
+    rows = [json.loads(l) for l in out.read_text().splitlines()]
+    assert len(calls) == 1 and "b.executeQuery" in calls[0]  # only the unsaved case is queried
+    assert rows[0]["verdict"] == SAFE and rows[0]["tokens_out"] == 7
+    assert not partial.exists()

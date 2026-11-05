@@ -45,9 +45,11 @@ def _cmd_sast(args: argparse.Namespace) -> int:
         from vulnpipe.sast import semgrep
 
         semgrep.run(cfg, corpus)
-    else:
-        print(f"error: SAST tool {args.tool!r} not implemented yet", file=sys.stderr)
-        return 1
+    else:  # tools that analyse the compiled project
+        import importlib
+
+        module = {"findsecbugs": "spotbugs"}.get(args.tool, args.tool)
+        importlib.import_module(f"vulnpipe.sast.{module}").run(cfg, corpus)
     return 0
 
 
@@ -127,8 +129,11 @@ def _cmd_hybrid(args: argparse.Namespace) -> int:
 
     traces = None
     if args.traces:
+        import json
+
         from vulnpipe.sast.semgrep import parse_text_traces
-        traces = parse_text_traces(Path(args.traces).read_text(encoding="utf-8"))
+        text = Path(args.traces).read_text(encoding="utf-8")
+        traces = json.loads(text) if args.traces.endswith(".json") else parse_text_traces(text)
 
     hybrid_run.run(
         cfg, corpus, sast_findings, model=args.model, scope=args.scope,
@@ -289,7 +294,8 @@ def build_parser() -> argparse.ArgumentParser:
     sast = sub.add_parser("sast", help="run a SAST tool over the corpus")
     sast_sub = sast.add_subparsers(dest="sast_command", required=True)
     srun = sast_sub.add_parser("run", help="run a SAST tool")
-    srun.add_argument("--tool", choices=["pmd", "semgrep"], default="pmd")
+    srun.add_argument("--tool", choices=["pmd", "semgrep", "findsecbugs", "codeql", "sonarqube"],
+                      default="pmd")
     srun.add_argument(
         "--variant", choices=["vanilla", "custom", "both"], default="both",
         help="PMD variant(s) to run (ignored for semgrep)",
@@ -330,8 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
     hrun.add_argument("--host", default="http://localhost:11434", help="Ollama server URL")
     hrun.add_argument("--corpus", default=None, help="ground-truth jsonl (default: corpus/juliet.jsonl)")
     hrun.add_argument("--traces", default=None,
-                      help="Semgrep text output with --dataflow-traces (scan/semgrep_traces.txt); "
-                           "switches the confirmer to the trace prompt")
+                      help="dataflow traces of the generator: scan/semgrep_traces.txt or "
+                           "scan/codeql_traces.json; switches the confirmer to the trace prompt")
     hrun.add_argument("--hints", action="store_true",
                       help="with --traces: list typical false-alarm causes in the prompt")
     hrun.set_defaults(func=_cmd_hybrid)

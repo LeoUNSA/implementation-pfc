@@ -727,3 +727,37 @@ Pending, or not implemented:
   `corpus build` and `metrics`, but all six subcommands exist.
 - **`docs/` and `README.md` are outdated** (README still says hybrid and
   figures are "not started" and shows Juliet-only results).
+
+## Addendum: analyzers that need the corpus compiled (November 2026)
+
+Three more SAST tools run through `vulnpipe sast run --tool findsecbugs|codeql|sonarqube`.
+They share `sast/project.py`, which writes a Maven project under
+`findings/<corpus>/build/` (git-ignored): the benchmark's own `pom.xml` and
+helper packages plus the 772 preprocessed cases, with only the class name
+restored so each file compiles. Line numbers therefore match `Snippet.code`.
+`project.maven()` runs Maven in the pinned container
+`maven:3.9.9-eclipse-temurin-17`, with dependencies cached in `data/m2`. The
+benchmark's formatter plugin (spotless) is always skipped so it cannot move
+lines. `data/owasp-benchmark` needs the `service` package in its sparse
+checkout (see the docstring of `corpus/owasp.py`).
+
+| Module | Tool name | How it runs | What counts as an alert |
+|---|---|---|---|
+| `sast/spotbugs.py` | `findsecbugs` | the benchmark's `findsecbugs` Maven profile (SpotBugs 4.10.4 + FindSecBugs 1.14.0, effort Max, threshold Low) | bug patterns starting with `SQL_` (CWE-89), `PATH_TRAVERSAL_` or `PT_` (CWE-22), in a case's class |
+| `sast/codeql.py` | `codeql` | CodeQL CLI 2.27.4 (unpacked in `data/tools/codeql`, mounted into the Maven container), default code-scanning suite | rules whose own metadata carries the CWE-89 or CWE-22/23/36 tag |
+| `sast/sonarqube.py` | `sonarqube` | a throwaway `sonarqube:10.7.0-community` server (data on tmpfs), Maven scanner, results read from the web API | hotspots and vulnerability issues of rules the server tags with those CWEs |
+
+`codeql.parse_sarif` also extracts each alert's dataflow path and writes
+`findings/<corpus>/scan/codeql_traces.json`, in the same shape as the Semgrep
+traces. `hybrid run --traces` accepts either file, so CodeQL can be the
+generator of the trace hybrid:
+
+    vulnpipe --config config.owasp.yaml hybrid run --sast findings/owasp/codeql_perSnippet.jsonl \
+        --traces findings/owasp/scan/codeql_traces.json --model qwen3:8b --scope reject --corpus corpus/owasp.jsonl
+
+Results on OWASP (772 cases): CodeQL F1 0.841 (recall 1.00, FPR 0.42),
+Semgrep 0.725, FindSecBugs 0.709 (recall 1.00, FPR 0.91), PMD custom 0.682,
+SonarQube CE 0.598 (flags every SQL case as a hotspot; no path traversal rule).
+
+Gotcha: SonarQube's embedded Elasticsearch stops when the disk holding its
+data is over 90 % full, which is why the server's data directory is a tmpfs.
