@@ -2,6 +2,7 @@ tool,precision,recall,fpr,f1,f1_ci_low,f1_ci_high,tp,fp,tn,fn
 codeql,0.7258,1.0000,0.4169,0.8411,0.8157,0.8655,405,153,214,0
 deepseek-coder_6.7b-instruct__zero-shot,0.5346,0.9160,0.8801,0.6752,0.6425,0.7076,371,323,44,34
 findsecbugs,0.5488,1.0000,0.9074,0.7087,0.6773,0.7381,405,333,34,0
+hybrid__codeql__qwen3_8b__reject__trace,0.8741,0.9432,0.1499,0.9074,0.8866,0.9266,382,55,312,23
 hybrid__semgrep__deepseek-coder_6.7b-instruct__augment,0.2483,0.0889,0.2970,0.1309,0.0937,0.1710,36,109,258,369
 hybrid__semgrep__deepseek-coder_6.7b-instruct__reject,0.4706,0.0198,0.0245,0.0379,0.0143,0.0659,8,9,358,397
 hybrid__semgrep__qwen3_8b__reject__trace,0.8310,0.8864,0.1989,0.8578,0.8308,0.8812,359,73,294,46
